@@ -1,0 +1,13 @@
+[project]
+name = "oceanbench-viz"
+version = "0.1.0"
+description = "Visualization helpers for OceanBench."
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "matplotlib",
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"

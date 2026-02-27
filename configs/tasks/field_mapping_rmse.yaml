@@ -1,0 +1,5 @@
+# Field mapping evaluation: RMSE/MAE on held-out points
+task: field_rmse
+metrics:
+  - rmse
+  - mae

@@ -1,0 +1,15 @@
+[project]
+name = "oceanbench-env"
+version = "0.1.0"
+description = "Environment and truth wrappers for the OceanBench benchmark."
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "xarray",
+  "oceanbench-core",
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+

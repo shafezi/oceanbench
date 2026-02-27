@@ -1,0 +1,15 @@
+[project]
+name = "oceanbench-bench"
+version = "0.1.0"
+description = "Evaluation harness and result logging for OceanBench."
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "oceanbench-core",
+  "oceanbench-models",
+  "oceanbench-tasks",
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"

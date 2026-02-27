@@ -1,0 +1,13 @@
+[project]
+name = "oceanbench-tasks"
+version = "0.1.0"
+description = "Task and metric definitions for the OceanBench benchmark."
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "oceanbench-core",
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"

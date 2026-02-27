@@ -1,43 +1,55 @@
 # OceanBench
 
-**Ocean data and analysis toolkit for Informative Path Planning (IPP)** — a modular collection of sub-packages for oceanographic data access, analysis, and visualization, designed to support IPP research and applications.
+**Ocean data and analysis toolkit for Informative Path Planning (IPP)** — a modular collection of sub-packages for oceanographic data access, field representation, evaluation, and visualization.
 
 ## Structure
 
-This repository contains multiple independently installable sub-packages:
+The repository follows the full intended OceanBench architecture. Current focus is the **field-model branch** (field representation and comparison).
 
-- **`oceanbench-data-provider/`** — Unified data provider for ocean products (HYCOM, Copernicus Marine)
-- *(Future sub-packages: `oceanbench-ipp/`, `oceanbench-viz/`, etc.)*
+| Package | Description |
+|--------|-------------|
+| **oceanbench-data-provider/** | Unified data provider (HYCOM, Copernicus); returns sanitized `xarray.Dataset` subsets. |
+| **oceanbench-core/** | Shared types (`Scenario`, `Observation`, `ObservationBatch`, `QueryPoints`), interpolation, RNG. |
+| **oceanbench-env/** | Truth layer `OceanTruthField` for querying ground truth; env/sim stubs for later. |
+| **oceanbench-models/** | **Field belief models** (Local Linear, GP, Sparse Online GP, Pseudo-Input GP, STGP, GMRF) plus sensor/dynamics/comms/fusion stubs. |
+| **oceanbench-tasks/** | Mapping task `field_rmse_score`, common metrics (RMSE, MAE); other task stubs. |
+| **oceanbench-bench/** | Evaluation harness `run_field_model_comparison`, result logging, save/load. |
+| **oceanbench-viz/** | Maps (truth, prediction, uncertainty, error). |
+| **oceanbench-agents/** | Agent/belief stubs for later. |
+| **oceanbench-policies/** | Policy/planner stubs for later. |
+
+See `docs/architecture.md` and `docs/field_models.md` for details.
 
 ## Quick Start
 
-**⚠️ Important: We strongly recommend using a virtual environment** to avoid conflicts with system packages and to keep your Python environment clean.
+**⚠️ Use a virtual environment** to avoid conflicts.
 
-### From PyPI (recommended for end users)
+### Field model comparison (current milestone)
 
 ```bash
-# Create and activate a virtual environment (recommended)
-# From the oceanbench/ directory
+cd oceanbench
 python -m venv oceanbench-venv
-source oceanbench-venv/bin/activate  # On Windows: oceanbench-venv\Scripts\activate
+source oceanbench-venv/bin/activate   # Windows: oceanbench-venv\Scripts\activate
 
-# Install the data provider (core)
-pip install oceanbench-data-provider
+# Install packages in dependency order (from repo root)
+pip install -e oceanbench-core
+pip install -e oceanbench-env
+pip install -e oceanbench-models
+pip install -e oceanbench-tasks
+pip install -e oceanbench-bench
+pip install -e oceanbench-viz
 
-# Or with optional dependencies
-pip install "oceanbench-data-provider[movie]"  # for movie generation
-# pip install "oceanbench-data-provider[dev,regrid,movie,notebooks]"  # all extras
+# Run comparison (synthetic data; no provider needed)
+python examples/compare_field_models.py
 ```
 
-### From source (development)
+Results are printed and optionally saved under `results/`. To use real data, set `USE_PROVIDER = True` in the script and install `oceanbench-data-provider`.
+
+### Data provider only
 
 ```bash
-# From the oceanbench/ directory:
-python -m venv oceanbench-venv
-source oceanbench-venv/bin/activate  # On Windows: oceanbench-venv\Scripts\activate
-cd oceanbench-data-provider
-pip install -e .  # core only
-# pip install -e ".[dev,regrid,movie,notebooks]"  # with extras
+pip install oceanbench-data-provider
+# or from source: cd oceanbench-data-provider && pip install -e .
 ```
 
 ## Sub-packages
@@ -67,6 +79,15 @@ ds = provider.subset(
     time=("2014-01-01", "2014-01-07"),
     variables=["temp", "sal", "u", "v"],
 )
+```
+
+## Tests
+
+From the repo root (with packages installed):
+
+```bash
+pip install pytest
+pytest tests/ -v
 ```
 
 ## License

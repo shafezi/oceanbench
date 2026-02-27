@@ -1,0 +1,8 @@
+# Simple test scenario (lat-lon box)
+name: test_region
+variable: temp
+region:
+  lat_min: 24.0
+  lat_max: 36.0
+  lon_min: -86.0
+  lon_max: -74.0

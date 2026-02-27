@@ -1,0 +1,10 @@
+[project]
+name = "oceanbench-policies"
+version = "0.1.0"
+description = "Policies and planners (stub)."
+requires-python = ">=3.10"
+dependencies = ["oceanbench-core"]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"

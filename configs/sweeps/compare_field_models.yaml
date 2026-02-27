@@ -1,0 +1,12 @@
+# Sweep config for field model comparison
+scenario: scenarios/test_region.yaml
+task: tasks/field_mapping_rmse.yaml
+models:
+  - local_linear
+  - gp
+  - sparse_online_gp
+  - pseudo_input_gp
+  - gmrf
+seed: 42
+n_train: 80
+n_eval: 200

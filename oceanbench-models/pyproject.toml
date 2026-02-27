@@ -1,0 +1,16 @@
+[project]
+name = "oceanbench-models"
+version = "0.1.0"
+description = "Model implementations for the OceanBench benchmark."
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "xarray",
+  "scipy",
+  "oceanbench-core",
+]
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
