@@ -18,8 +18,9 @@ from oceanbench_models.belief.field import (
 MODELS = [
     ("local_linear", LocalLinearFieldModel({"k_neighbors": 10}, seed=42)),
     ("gp", GPFieldModel({"lengthscale": 1.0, "noise": 0.01}, seed=42)),
-    ("sparse_online_gp", SparseOnlineGPFieldModel({"max_points": 80}, seed=42)),
-    ("pseudo_input_gp", PseudoInputGPFieldModel({"n_pseudo": 30}, seed=42)),
+    # Use a modest number of inducing points / iters to keep tests fast.
+    ("sparse_online_gp", SparseOnlineGPFieldModel({"n_pseudo": 32, "training_iters": 5, "update_iters": 2}, seed=42)),
+    ("pseudo_input_gp", PseudoInputGPFieldModel({"n_pseudo": 32, "training_iters": 5}, seed=42)),
     ("gmrf", GMRFFieldModel({"n_lat": 15, "n_lon": 15}, seed=42)),
 ]
 
@@ -56,3 +57,18 @@ def test_predict_mean_std(name, model, small_observation_batch, small_query_poin
         assert std is not None and std.shape == (small_query_points.size,)
     else:
         assert std is None
+
+
+@pytest.mark.parametrize("name,model", MODELS)
+def test_update_semantics(name, model, small_observation_batch, small_query_points):
+    model.fit(small_observation_batch)
+    new_obs = small_observation_batch  # reuse for simplicity
+    if model.supports_online_update:
+        # Online-capable models should allow update and remain fitted.
+        model.update(new_obs)
+        assert model.is_fitted
+        _ = model.predict(small_query_points)
+    else:
+        # Non-online models should raise a clear error.
+        with pytest.raises(NotImplementedError):
+            model.update(new_obs)

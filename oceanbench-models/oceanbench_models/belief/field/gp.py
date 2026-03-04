@@ -4,12 +4,20 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
 import numpy as np
-from scipy.linalg import cho_factor, cho_solve
+import gpytorch
+import torch
 
 from oceanbench_core.types import ObservationBatch, QueryPoints, Scenario
 
 from .base import ArrayLike, FieldBeliefModel, FieldPrediction
-from .utils import parse_gp_hyperparams, rbf_kernel
+from .utils import (
+    FeatureScaler,
+    get_torch_device,
+    numpy_to_torch,
+    observation_batch_to_numpy,
+    parse_gp_hyperparams,
+    query_points_to_numpy,
+)
 
 
 @dataclass
@@ -20,17 +28,19 @@ class GPConfig:
     Parameters
     ----------
     lengthscale:
-        RBF kernel lengthscale (in feature space units).
+        Initial RBF kernel lengthscale (in feature space units).
     variance:
-        Kernel signal variance.
+        Initial kernel signal variance.
     noise:
-        Observation noise variance added to the diagonal of K.
+        Initial observation noise variance.
     include_time:
         Whether to include time as a feature when available.
     include_depth:
         Whether to include depth as a feature when available.
-    jitter:
-        Small diagonal jitter for numerical stability in Cholesky.
+    use_scaling:
+        If True, standardize features using a per-dimension mean/std.
+    training_iters:
+        Number of optimization steps for hyperparameters (0 = no training).
     """
 
     lengthscale: float = 1.0
@@ -38,19 +48,41 @@ class GPConfig:
     noise: float = 1e-3
     include_time: bool = True
     include_depth: bool = True
-    jitter: float = 1e-8
+    use_scaling: bool = True
+    training_iters: int = 0
+
+
+class _ExactGPRegressionModel(gpytorch.models.ExactGP):
+    def __init__(
+        self,
+        train_x: torch.Tensor,
+        train_y: torch.Tensor,
+        likelihood: gpytorch.likelihoods.GaussianLikelihood,
+        *,
+        lengthscale: float,
+        variance: float,
+    ) -> None:
+        super().__init__(train_x, train_y, likelihood)
+        self.mean_module = gpytorch.means.ConstantMean()
+        base_kernel = gpytorch.kernels.RBFKernel()
+        base_kernel.lengthscale = float(lengthscale)
+        self.covar_module = gpytorch.kernels.ScaleKernel(base_kernel)
+        self.covar_module.outputscale = float(variance)
+
+    def forward(self, x: torch.Tensor) -> gpytorch.distributions.MultivariateNormal:
+        mean_x = self.mean_module(x)
+        covar_x = self.covar_module(x)
+        return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
 
 
 class GPFieldModel(FieldBeliefModel):
     """
-    Standard Gaussian Process regression model for scalar ocean fields.
+    Gaussian Process regression model for scalar ocean fields using GPyTorch.
 
-    This implementation uses an isotropic RBF kernel over the feature space
-    defined by latitude, longitude, and optionally time/depth. It provides
-    predictive means and standard deviations at arbitrary query points.
-
-    This reference implementation is primarily aimed at moderate training
-    sizes where an O(N^3) Cholesky factorization is acceptable.
+    The model uses an ExactGP with an RBF kernel and Gaussian likelihood.
+    It provides predictive means and standard deviations at arbitrary query
+    points. Hyperparameters can optionally be optimized via marginal
+    likelihood using a small number of training iterations.
     """
 
     def __init__(
@@ -60,7 +92,7 @@ class GPFieldModel(FieldBeliefModel):
         seed: Optional[int] = None,
     ) -> None:
         super().__init__(config=config, seed=seed)
-        cfg_mapping = config or {}
+        cfg_mapping = dict(config or {})
         lengthscale, variance, noise = parse_gp_hyperparams(cfg_mapping)
         self._cfg = GPConfig(
             lengthscale=lengthscale,
@@ -68,13 +100,17 @@ class GPFieldModel(FieldBeliefModel):
             noise=noise,
             include_time=bool(cfg_mapping.get("include_time", True)),
             include_depth=bool(cfg_mapping.get("include_depth", True)),
-            jitter=float(cfg_mapping.get("jitter", 1e-8)),
+            use_scaling=bool(cfg_mapping.get("use_scaling", True)),
+            training_iters=int(cfg_mapping.get("training_iters", 0)),
         )
 
-        self._X: Optional[ArrayLike] = None
-        self._y: Optional[ArrayLike] = None
-        self._cho: Optional[tuple[ArrayLike, bool]] = None
-        self._alpha: Optional[ArrayLike] = None
+        self._device: torch.device = get_torch_device(cfg_mapping)
+        self._scaler: Optional[FeatureScaler] = None
+
+        self._model: Optional[_ExactGPRegressionModel] = None
+        self._likelihood: Optional[gpytorch.likelihoods.GaussianLikelihood] = None
+        self._train_x: Optional[torch.Tensor] = None
+        self._train_y: Optional[torch.Tensor] = None
         self._variable: Optional[str] = None
 
     # ------------------------------------------------------------------
@@ -87,8 +123,7 @@ class GPFieldModel(FieldBeliefModel):
 
     @property
     def supports_online_update(self) -> bool:
-        # This implementation does not maintain low-rank updates of the
-        # Cholesky factor; we encourage refitting for now.
+        # This implementation does not implement efficient online updates.
         return False
 
     # ------------------------------------------------------------------
@@ -101,31 +136,59 @@ class GPFieldModel(FieldBeliefModel):
         *,
         scenario: Optional[Scenario] = None,
     ) -> None:
-        X = observations.as_features(
+        if self._seed is not None:
+            torch.manual_seed(self._seed)
+            np.random.seed(self._seed)
+
+        X_np, y_np = observation_batch_to_numpy(
+            observations,
             include_time=self._cfg.include_time,
             include_depth=self._cfg.include_depth,
         )
-        y = observations.values.astype(float)
+        if self._cfg.use_scaling:
+            self._scaler = FeatureScaler.from_data(X_np)
+            X_np = self._scaler.transform(X_np)
+        else:
+            self._scaler = None
 
-        self._X = X
-        self._y = y
-        self._variable = observations.variable
+        train_x = numpy_to_torch(X_np, device=self._device)
+        train_y = numpy_to_torch(y_np.reshape(-1), device=self._device)
 
-        K = rbf_kernel(
-            X,
-            X,
+        likelihood = gpytorch.likelihoods.GaussianLikelihood()
+        likelihood.noise = float(self._cfg.noise)
+        model = _ExactGPRegressionModel(
+            train_x,
+            train_y,
+            likelihood,
             lengthscale=self._cfg.lengthscale,
             variance=self._cfg.variance,
-        )
-        n = K.shape[0]
-        K[np.diag_indices(n)] += self._cfg.noise + self._cfg.jitter
+        ).to(self._device)
+        likelihood = likelihood.to(self._device)
 
-        cho = cho_factor(K, lower=True, overwrite_a=False, check_finite=False)
-        alpha = cho_solve(cho, y, check_finite=False)
+        self._train_x = train_x
+        self._train_y = train_y
+        self._model = model
+        self._likelihood = likelihood
+        self._variable = observations.variable
 
-        self._cho = cho
-        self._alpha = alpha
+        if self._cfg.training_iters > 0:
+            model.train()
+            likelihood.train()
+            optimizer = torch.optim.Adam(
+                list(model.parameters()) + 
+                list(likelihood.parameters()),
+                lr=float(self.config.get("lr", 0.1)),
+            )
+            mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
+            for _ in range(self._cfg.training_iters):
+                optimizer.zero_grad(set_to_none=True)
+                output = model(train_x)
+                loss = -mll(output, train_y)
+                loss.backward()
+                optimizer.step()
 
+        model.eval()
+        likelihood.eval()
         self._mark_fitted()
 
     def update(self, observations: ObservationBatch) -> None:
@@ -142,43 +205,45 @@ class GPFieldModel(FieldBeliefModel):
         )
 
     def predict(self, query_points: QueryPoints) -> FieldPrediction:
-        if not self.is_fitted or self._X is None or self._cho is None or self._alpha is None:
+        if (
+            not self.is_fitted
+            or self._model is None
+            or self._likelihood is None
+        ):
             raise RuntimeError("Model must be fitted before prediction.")
 
-        Xq = query_points.as_features(
+        Xq_np = query_points_to_numpy(
+            query_points,
             include_time=self._cfg.include_time,
             include_depth=self._cfg.include_depth,
         )
+        if self._scaler is not None:
+            Xq_np = self._scaler.transform(Xq_np)
 
-        K_xs_x = rbf_kernel(
-            Xq,
-            self._X,
-            lengthscale=self._cfg.lengthscale,
-            variance=self._cfg.variance,
-        )
-        mean = K_xs_x @ self._alpha
+        test_x = numpy_to_torch(Xq_np, device=self._device)
 
-        # Predictive variance: diag(K_ss - K_sx K_xx^{-1} K_xs)
-        K_xs_x_T = K_xs_x.T
-        v = cho_solve(self._cho, K_xs_x_T, check_finite=False)
-        K_ss_diag = np.full(Xq.shape[0], self._cfg.variance, dtype=float)
-        var = K_ss_diag - np.einsum("ij,ij->j", K_xs_x_T, v)
+        self._model.eval()
+        self._likelihood.eval()
+        with torch.no_grad(), gpytorch.settings.fast_pred_var():
+            pred_dist = self._likelihood(self._model(test_x))
+            mean = pred_dist.mean.detach().cpu().numpy()
+            var_obs = pred_dist.variance.detach().cpu().numpy()
 
-        # Numerical guard: variance must be non-negative.
-        var = np.maximum(var, 0.0)
+        # Convert observation variance to latent field variance by removing
+        # the (homoskedastic) noise variance from the Gaussian likelihood.
+        noise_var = float(self._likelihood.noise.detach().cpu())
+        var = np.maximum(var_obs.astype(float).reshape(-1) - noise_var, 0.0)
+        mean = mean.astype(float).reshape(-1)
         std = np.sqrt(var)
 
-        return FieldPrediction(
-            mean=mean.astype(float),
-            std=std.astype(float),
-            metadata={},
-        )
+        return FieldPrediction(mean=mean, std=std, metadata={})
 
     def reset(self) -> None:
         super().reset()
-        self._X = None
-        self._y = None
-        self._cho = None
-        self._alpha = None
+        self._scaler = None
+        self._model = None
+        self._likelihood = None
+        self._train_x = None
+        self._train_y = None
         self._variable = None
 

@@ -7,6 +7,9 @@ dependencies = [
   "numpy",
   "xarray",
   "scipy",
+  "scikit-learn>=1.4,<2.0",
+  "torch>=2.0,<3.0",
+  "gpytorch>=1.14,<2.0",
   "oceanbench-core",
 ]
 

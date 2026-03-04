@@ -4,11 +4,12 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
 import numpy as np
-from scipy.spatial import cKDTree
+from sklearn.neighbors import KNeighborsRegressor
 
 from oceanbench_core.types import ObservationBatch, QueryPoints, Scenario
 
 from .base import ArrayLike, FieldBeliefModel, FieldPrediction
+from .utils import observation_batch_to_numpy, query_points_to_numpy
 
 
 @dataclass
@@ -20,37 +21,24 @@ class LocalLinearConfig:
     ----------
     k_neighbors:
         Number of nearest neighbors to use for each query.
-    min_neighbors:
-        Minimum number of neighbors required to perform a local fit. If fewer
-        are available, a simple average of the available neighbors is used.
     include_time:
         Whether to include time as a feature when available.
     include_depth:
         Whether to include depth as a feature when available.
-    regularization:
-        Small L2 regularization added to the local design matrix for numerical
-        stability.
     """
 
     k_neighbors: int = 20
-    min_neighbors: int = 3
     include_time: bool = True
     include_depth: bool = True
-    regularization: float = 1e-6
 
 
 class LocalLinearFieldModel(FieldBeliefModel):
     """
-    Simple local linear regression baseline for field prediction.
+    Simple local regression baseline for field prediction using scikit-learn.
 
-    For each query point, this model:
-    - finds k nearest observed neighbors in feature space,
-    - fits a linear model of value as a function of coordinates in that
-      neighborhood (with small L2 regularization),
-    - evaluates the fitted model at the query point.
-
-    This provides a fast, interpretable baseline and a sanity check for the
-    evaluation pipeline. It does not provide rigorous uncertainty estimates.
+    Internally uses `KNeighborsRegressor` with distance-based weights. This
+    preserves the FieldBeliefModel interface while delegating the neighbor
+    search and weighting to a standard library implementation.
     """
 
     def __init__(
@@ -63,15 +51,13 @@ class LocalLinearFieldModel(FieldBeliefModel):
         cfg = config or {}
         self._cfg = LocalLinearConfig(
             k_neighbors=int(cfg.get("k_neighbors", 20)),
-            min_neighbors=int(cfg.get("min_neighbors", 3)),
             include_time=bool(cfg.get("include_time", True)),
             include_depth=bool(cfg.get("include_depth", True)),
-            regularization=float(cfg.get("regularization", 1e-6)),
         )
 
         self._X: Optional[ArrayLike] = None
         self._y: Optional[ArrayLike] = None
-        self._tree: Optional[cKDTree] = None
+        self._knn: Optional[KNeighborsRegressor] = None
         self._variable: Optional[str] = None
 
     # ------------------------------------------------------------------
@@ -98,15 +84,24 @@ class LocalLinearFieldModel(FieldBeliefModel):
         *,
         scenario: Optional[Scenario] = None,
     ) -> None:
-        X = observations.as_features(
+        X, y = observation_batch_to_numpy(
+            observations,
             include_time=self._cfg.include_time,
             include_depth=self._cfg.include_depth,
         )
-        y = observations.values.astype(float)
+
+        if X.shape[0] < 1:
+            raise RuntimeError("LocalLinearFieldModel requires at least one observation.")
+
+        k = min(self._cfg.k_neighbors, X.shape[0])
+        self._knn = KNeighborsRegressor(
+            n_neighbors=k,
+            weights="distance",
+        )
+        self._knn.fit(X, y)
 
         self._X = X
         self._y = y
-        self._tree = cKDTree(X)
         self._variable = observations.variable
 
         self._mark_fitted()
@@ -125,79 +120,21 @@ class LocalLinearFieldModel(FieldBeliefModel):
         )
 
     def predict(self, query_points: QueryPoints) -> FieldPrediction:
-        if not self.is_fitted or self._X is None or self._tree is None:
+        if not self.is_fitted or self._knn is None:
             raise RuntimeError("Model must be fitted before prediction.")
 
-        Xq = query_points.as_features(
+        Xq = query_points_to_numpy(
+            query_points,
             include_time=self._cfg.include_time,
             include_depth=self._cfg.include_depth,
         )
-
-        k = min(self._cfg.k_neighbors, self._X.shape[0])
-        if k < self._cfg.min_neighbors:
-            raise RuntimeError(
-                f"Not enough observations for local linear regression "
-                f"(have {self._X.shape[0]}, need at least "
-                f"{self._cfg.min_neighbors})."
-            )
-
-        dists, idxs = self._tree.query(Xq, k=k)
-
-        # Ensure 2D arrays for unified handling when k == 1.
-        if k == 1:
-            dists = dists[:, None]
-            idxs = idxs[:, None]
-
-        n_queries = Xq.shape[0]
-        preds = np.empty(n_queries, dtype=float)
-
-        # Simple distance-based weights; closer points get higher weights.
-        # We avoid division by zero by adding a small epsilon.
-        eps = 1e-12
-
-        for i in range(n_queries):
-            neigh_idx = idxs[i]
-            neigh_dists = dists[i]
-
-            mask = np.isfinite(neigh_dists)
-            neigh_idx = neigh_idx[mask]
-            neigh_dists = neigh_dists[mask]
-
-            if neigh_idx.size < self._cfg.min_neighbors:
-                # Fall back to simple average of available neighbors.
-                preds[i] = float(self._y[neigh_idx].mean())
-                continue
-
-            X_local = self._X[neigh_idx]
-            y_local = self._y[neigh_idx]
-
-            # Weights: inverse distance, with clipping for numerical stability.
-            w = 1.0 / (neigh_dists + eps)
-            w /= w.sum()
-
-            # Design matrix with bias term.
-            Phi = np.concatenate(
-                [np.ones((X_local.shape[0], 1)), X_local],
-                axis=1,
-            )
-
-            # Weighted least squares: (Phi^T W Phi + λI)^{-1} Phi^T W y
-            W = np.diag(w)
-            A = Phi.T @ W @ Phi
-            A += self._cfg.regularization * np.eye(A.shape[0])
-            b = Phi.T @ W @ y_local
-
-            coef = np.linalg.solve(A, b)
-
-            xq = np.concatenate([[1.0], Xq[i]])
-            preds[i] = float(xq @ coef)
-
+        preds = self._knn.predict(Xq).astype(float).reshape(-1)
         return FieldPrediction(mean=preds, std=None, metadata={})
 
     def reset(self) -> None:
         super().reset()
         self._X = None
         self._y = None
-        self._tree = None
+        self._knn = None
         self._variable = None
 
