@@ -1,0 +1,19 @@
+# GRG and baseline policy configuration for Binney mapping.
+
+policy:
+  type: grg  # grg | greedy_myopic | random_walk | bruteforce_finite_horizon
+
+planning:
+  mode: offline  # offline | receding_horizon
+  budget_seconds: 36000.0
+  horizon_seconds: 7200.0
+  execute_seconds: 3600.0
+  depth: 2
+  n_splits: 5
+  split_strategy: uniform
+
+bruteforce:
+  max_depth: 4
+  max_nodes: 40
+  max_paths: 5000
+

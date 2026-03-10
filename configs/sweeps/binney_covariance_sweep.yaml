@@ -1,0 +1,14 @@
+# Sweep over covariance backends for Binney mapping.
+
+base_config:
+  include:
+    - configs/base.yaml
+    - configs/scenarios/binney_region.yaml
+    - configs/tasks/binney_mapping.yaml
+    - configs/policies/grg.yaml
+
+sweep:
+  covariance.backend:
+    - kernel
+    - empirical
+

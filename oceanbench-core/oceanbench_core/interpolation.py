@@ -91,17 +91,37 @@ def interpolate_dataset(
     if bounds_mode == "clip":
         for name, arr in list(coords.items()):
             base = ds.coords[name]
-            v = arr.values.astype(float)
-            v = np.clip(v, float(base.min()), float(base.max()))
-            coords[name] = xr.DataArray(v, dims=("points",))
+            if np.issubdtype(base.dtype, np.datetime64):
+                v_dt = np.asarray(arr.values).astype("datetime64[ns]")
+                v_int = v_dt.astype("int64")
+                bmin = base.min().values.astype("datetime64[ns]").astype("int64")
+                bmax = base.max().values.astype("datetime64[ns]").astype("int64")
+                v_int = np.clip(v_int, bmin, bmax)
+                coords[name] = xr.DataArray(
+                    v_int.astype("datetime64[ns]"),
+                    dims=("points",),
+                )
+            else:
+                v = arr.values.astype(float)
+                v = np.clip(v, float(base.min()), float(base.max()))
+                coords[name] = xr.DataArray(v, dims=("points",))
     elif bounds_mode == "error":
         for name, arr in coords.items():
             base = ds.coords[name]
-            v = arr.values.astype(float)
-            if (v < float(base.min())).any() or (v > float(base.max())).any():
-                raise ValueError(
-                    f"Query coordinate for {name!r} is outside dataset bounds."
-                )
+            if np.issubdtype(base.dtype, np.datetime64):
+                v_int = np.asarray(arr.values).astype("datetime64[ns]").astype("int64")
+                bmin = base.min().values.astype("datetime64[ns]").astype("int64")
+                bmax = base.max().values.astype("datetime64[ns]").astype("int64")
+                if (v_int < bmin).any() or (v_int > bmax).any():
+                    raise ValueError(
+                        f"Query coordinate for {name!r} is outside dataset bounds."
+                    )
+            else:
+                v = arr.values.astype(float)
+                if (v < float(base.min())).any() or (v > float(base.max())).any():
+                    raise ValueError(
+                        f"Query coordinate for {name!r} is outside dataset bounds."
+                    )
     elif bounds_mode != "nan":
         raise ValueError(
             f"Unknown bounds_mode {bounds_mode!r}; expected 'nan', 'clip', or 'error'."

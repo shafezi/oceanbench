@@ -1,0 +1,15 @@
+# Scenario configuration for Binney et al. (2013) experiments.
+
+name: binney_region
+variable: temp
+region:
+  lat_min: 24.0
+  lat_max: 36.0
+  lon_min: -86.0
+  lon_max: -74.0
+time_range:
+  - 2014-01-01T00:00:00
+  - 2014-01-07T00:00:00
+metadata:
+  product_id: hycom_glbv0.08_reanalysis_53x
+

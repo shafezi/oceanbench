@@ -4,7 +4,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # So that "import oceanbench_core" etc. work when running tests from repo root
-for pkg in ["oceanbench-core", "oceanbench-env", "oceanbench-models", "oceanbench-tasks", "oceanbench-bench"]:
+for pkg in ["oceanbench-core", "oceanbench-env", "oceanbench-models", "oceanbench-tasks", "oceanbench-bench", "oceanbench-policies", "oceanbench-data-provider"]:
     d = REPO_ROOT / pkg
     if d.exists():
         s = str(d)

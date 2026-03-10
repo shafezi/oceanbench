@@ -1,0 +1,65 @@
+# Binney mapping task configuration (graph, sampling, eval, covariance, objective).
+
+task: binney_mapping
+
+graph:
+  type: grid  # or random_geometric
+  seed: 123
+  grid:
+    n_lat: 10
+    n_lon: 10
+  # For random_geometric:
+  random:
+    n_nodes: 80
+    k: 6
+  start:
+    node_id: 0
+  goal:
+    node_id: 99
+
+robot:
+  speed_mps: 1.0
+
+sampling:
+  mode: nodes+edges
+  edge_spacing_m: 20000.0
+  include_nodes: true
+  measurement_noise_var: 0.01
+
+time:
+  dynamic: true
+  tau0: 2014-01-01T00:00:00
+  snap_to_provider_grid: false
+  interp: linear
+
+objective:
+  type: emse  # emse | entropy | mutual_info
+  eval_set: dense_grid
+
+eval:
+  grid_n_lat: 40
+  grid_n_lon: 40
+  max_points: 10000
+  subsample_strategy: random
+  metrics:
+    - rmse
+    - mae
+    - objective
+    - runtime
+
+covariance:
+  backend: kernel  # kernel | empirical
+  kernel:
+    lengthscale_space: 1.0
+    lengthscale_time: 1.0
+    variance: 1.0
+    noise: 0.01
+    fit: false
+    fit_max_iters: 0
+    fit_subsample_n: 512
+  empirical:
+    window_days: 30
+    stride: 1d
+    max_snapshots: 30
+    use_anomalies: true
+

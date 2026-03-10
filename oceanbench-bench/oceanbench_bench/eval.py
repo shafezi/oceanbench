@@ -89,3 +89,22 @@ def run_field_model_comparison(
         runs=runs,
         metadata={"n_train": train_observations.size, "n_eval": n_eval},
     )
+
+
+def evaluate_binney_dense_grid(
+    *,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    query_points: QueryPoints,
+) -> Dict[str, float]:
+    """
+    Evaluate Binney-style runs on a dense grid using RMSE/MAE.
+
+    This is a thin wrapper around ``field_rmse_score`` for consistency with
+    the existing field-model evaluation API.
+    """
+    y_true = np.asarray(y_true, dtype=float).ravel()
+    y_pred = np.asarray(y_pred, dtype=float).ravel()
+    if y_true.shape != y_pred.shape:
+        raise ValueError("y_true and y_pred must have the same shape for evaluation.")
+    return field_rmse_score(y_true, y_pred, query_points=query_points, include_mae=True)
