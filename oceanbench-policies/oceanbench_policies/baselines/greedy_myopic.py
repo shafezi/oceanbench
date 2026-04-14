@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-# Stop messages:
-# - "[greedy_myopic] stop: reached goal node"
-# - "[greedy_myopic] stop: budget exhausted"
-# - "[greedy_myopic] stop: no neighbors"
-# - "[greedy_myopic] stop: no feasible neighbor within budget"
+import logging
 
 from dataclasses import dataclass
 from typing import List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-from oceanbench_core import WaypointGraph, arrival_time
+logger = logging.getLogger(__name__)
+
+from oceanbench_core import WaypointGraph, arrival_time, features_from_items
 from oceanbench_core.sampling import MeasurementItem, h as sampling_fn
 from oceanbench_tasks.mapping.binney_objectives import BinneyObjective
 
@@ -45,18 +43,19 @@ class GreedyMyopicBinneyPlanner:
         current = s
         path = [current]
         remaining = float(B)
+        tau_current = np.datetime64(tau)  # cached arrival time at current node
         X_items: list[MeasurementItem] = []
         X_feats = self._features_from_items(X_items)
 
         for _ in range(self.config.max_steps):
             if current == t or remaining <= 0.0:
                 reason = "reached goal node" if current == t else "budget exhausted"
-                print(f"[greedy_myopic] stop: {reason}")
+                logger.debug("[greedy_myopic] stop: %s", reason)
                 break
 
             neighbors = list(self.graph.graph.neighbors(current))
             if not neighbors:
-                print("[greedy_myopic] stop: no neighbors")
+                logger.debug("[greedy_myopic] stop: no neighbors")
                 break
 
             best_score = float("-inf")
@@ -68,13 +67,16 @@ class GreedyMyopicBinneyPlanner:
                 dt_edge = float(edge["time_s"])
                 if dt_edge <= 0.0 or dt_edge > remaining:
                     continue
+                # Must still be able to reach goal t after moving to nb.
+                remaining_after = remaining - dt_edge
+                if not self.graph.is_feasible(int(nb), t, remaining_after):
+                    continue
 
                 # Approximate short local path [current, nb].
                 local_path = [current, int(nb)]
-                tau_local = arrival_time(path, tau, self.graph)
                 S = sampling_fn(
                     path=local_path,
-                    tau=tau_local,
+                    tau=tau_current,
                     graph=self.graph,
                     sampling_cfg=self.sampling_config,
                 )
@@ -88,14 +90,17 @@ class GreedyMyopicBinneyPlanner:
                     best_samples = S
 
             if best_next is None or best_samples is None:
-                print("[greedy_myopic] stop: no feasible neighbor within budget")
+                logger.debug("[greedy_myopic] stop: no feasible neighbor within budget")
                 break
 
-            # Commit to best_next.
+            # Commit to best_next and advance cached arrival time.
+            edge = self.graph.edge_attributes(current, best_next)
+            dt_ns = int(round(float(edge["time_s"]) * 1e9))
+            tau_current = tau_current + np.timedelta64(dt_ns, "ns")
             path.append(best_next)
             X_items.extend(best_samples)
             X_feats = self._features_from_items(X_items)
-            remaining -= float(self.graph.edge_attributes(current, best_next)["time_s"])
+            remaining -= float(edge["time_s"])
             current = best_next
 
         samples = sampling_fn(
@@ -105,23 +110,11 @@ class GreedyMyopicBinneyPlanner:
             sampling_cfg=self.sampling_config,
         )
         feats = self._features_from_items(samples)
+        # Use value() which equals marginal_gain(empty, feats) since this
+        # planner starts fresh with no prior context.
         gain = float(self.objective.value(feats))
         return path, samples, gain
 
     @staticmethod
     def _features_from_items(items: Sequence[MeasurementItem]) -> np.ndarray:
-        if not items:
-            return np.zeros((0, 2), dtype=float)
-        lats = np.array([it.lat for it in items], dtype=float)
-        lons = np.array([it.lon for it in items], dtype=float)
-        feats = [lats, lons]
-        if any(it.time is not None for it in items):
-            times = []
-            for it in items:
-                if it.time is None:
-                    times.append(np.datetime64("NaT", "ns"))
-                else:
-                    times.append(np.datetime64(it.time, "ns"))
-            t_arr = np.array(times, dtype="datetime64[ns]").astype("int64") / 1e9
-            feats.append(t_arr.astype(float))
-        return np.column_stack(feats)
+        return features_from_items(items)

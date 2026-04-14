@@ -23,7 +23,7 @@ class MeasurementItem:
     depth: Optional[float] = None
 
     source: str = "node"  # "node" or "edge"
-    node_index: Optional[int] = None
+    node_index: Optional[int] = None  # for nodes: index in path; for edges: edge index in path
     edge: Optional[Tuple[int, int]] = None
     alpha: Optional[float] = None  # fractional position along edge in [0, 1]
 
@@ -95,16 +95,23 @@ def h(
     t = np.datetime64(tau)
     items: List[MeasurementItem] = []
 
-    # Node samples.
+    # Node samples — compute arrival times incrementally (O(n) instead of
+    # O(n²) from repeated prefix traversals).
     if include_nodes:
+        t_node = np.datetime64(tau)
         for idx, node in enumerate(path):
             lat, lon = graph.node_coords(node)
+            node_dep = graph.node_depth(node)
+            if idx > 0:
+                edge = graph.edge_attributes(path[idx - 1], node)
+                dt_ns = int(round(float(edge["time_s"]) * 1e9))
+                t_node = t_node + np.timedelta64(dt_ns, "ns")
             items.append(
                 MeasurementItem(
                     lat=lat,
                     lon=lon,
-                    time=t if idx == 0 else arrival_time(path[: idx + 1], tau, graph),
-                    depth=None,
+                    time=t_node,
+                    depth=node_dep,
                     source="node",
                     node_index=idx,
                     edge=None,
@@ -121,13 +128,24 @@ def h(
 
         lat_u, lon_u = graph.node_coords(u)
         lat_v, lon_v = graph.node_coords(v)
+        dep_u = graph.node_depth(u)
+        dep_v = graph.node_depth(v)
 
         if edge_spacing_m > 0.0 and d > 0.0:
             k = int(d // edge_spacing_m)
             for j in range(1, k + 1):
                 alpha = (j * edge_spacing_m) / d
+                if alpha >= 1.0:
+                    break  # avoid duplicating the destination node
                 lat = (1.0 - alpha) * lat_u + alpha * lat_v
                 lon = (1.0 - alpha) * lon_u + alpha * lon_v
+                # Interpolate depth along the edge when available.
+                if dep_u is not None and dep_v is not None:
+                    dep_alpha: Optional[float] = float(
+                        (1.0 - alpha) * dep_u + alpha * dep_v
+                    )
+                else:
+                    dep_alpha = None
                 dt_s = alpha * c
                 dt_ns = int(round(dt_s * 1e9))
                 t_alpha = t_i + np.timedelta64(dt_ns, "ns")
@@ -136,7 +154,7 @@ def h(
                         lat=float(lat),
                         lon=float(lon),
                         time=t_alpha,
-                        depth=None,
+                        depth=dep_alpha,
                         source="edge",
                         node_index=idx,
                         edge=(int(u), int(v)),
@@ -185,4 +203,46 @@ def snap_times_to_available(
         idx = int(np.argmin(np.abs(avail_int - ti)))
         snapped.append(avail[idx])
     return np.array(snapped, dtype="datetime64[ns]")
+
+
+def features_from_items(items: Sequence[MeasurementItem]) -> np.ndarray:
+    """
+    Convert measurement items to a feature matrix for covariance backends
+    and objectives.
+
+    Returns an array with columns [lat, lon] or [lat, lon, depth] or
+    [lat, lon, time_seconds] or [lat, lon, depth, time_seconds] depending
+    on which optional fields are present.  Time is represented as seconds
+    since the Unix epoch (float64).  Depth is in meters (positive down).
+
+    Column order: lat, lon, [depth], [time].
+
+    This is the single canonical implementation; all planners, baselines,
+    and tasks should use this rather than maintaining their own copies.
+    """
+    if not items:
+        return np.zeros((0, 2), dtype=float)
+
+    lats = np.array([it.lat for it in items], dtype=float)
+    lons = np.array([it.lon for it in items], dtype=float)
+    feats: list[np.ndarray] = [lats, lons]
+
+    if any(it.depth is not None for it in items):
+        depths = np.array(
+            [it.depth if it.depth is not None else 0.0 for it in items],
+            dtype=float,
+        )
+        feats.append(depths)
+
+    if any(it.time is not None for it in items):
+        times = []
+        for it in items:
+            if it.time is None:
+                times.append(np.datetime64("NaT", "ns"))
+            else:
+                times.append(np.datetime64(it.time, "ns"))
+        t_arr = np.array(times, dtype="datetime64[ns]").astype("int64") / 1e9
+        feats.append(t_arr.astype(float))
+
+    return np.column_stack(feats)
 

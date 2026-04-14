@@ -40,22 +40,41 @@ class WaypointGraph:
         n_lat: int,
         n_lon: int,
         *,
+        n_depth: int = 1,
         speed_mps: float,
+        connectivity: str = "4",
         seed: Optional[int] = None,
     ) -> "WaypointGraph":
         """
-        Build a rectilinear lat-lon grid graph over a region.
+        Build a grid graph over a region, optionally including depth layers.
 
         Parameters
         ----------
         region:
             Mapping with keys ``lat_min``, ``lat_max``, ``lon_min``,
-            ``lon_max`` (degrees).
+            ``lon_max`` (degrees).  May also include ``depth_min`` and
+            ``depth_max`` (meters, positive-down) for 3-D grids.
         n_lat, n_lon:
             Number of grid points along latitude and longitude.
+        n_depth:
+            Number of depth layers.  When ``1`` (default) the graph is a
+            standard 2-D grid and no ``depth`` attribute is stored on nodes.
         speed_mps:
             Robot speed in meters per second. Edge travel times are
             ``length_m / speed_mps``.
+        connectivity:
+            Grid connectivity pattern:
+
+            - ``"4"`` — rectilinear (up/down/left/right), the default.
+            - ``"8"`` — king's moves (4-connected plus diagonals).
+            - ``"triangular"`` — triangular lattice matching Binney et al.
+              (2013) Fig. 3.  Odd rows are shifted by half a lon-step and
+              each node connects to its 6 nearest neighbours, producing
+              approximately equilateral triangles.
+
+            In 3-D mode (``n_depth > 1``), each depth layer uses the
+            requested horizontal connectivity, and adjacent layers at
+            the same (lat, lon) position are connected vertically.
         seed:
             Unused for grids but accepted for a uniform interface.
         """
@@ -66,27 +85,87 @@ class WaypointGraph:
         lon_min = float(region["lon_min"])
         lon_max = float(region["lon_max"])
 
-        lats = np.linspace(lat_min, lat_max, int(n_lat))
-        lons = np.linspace(lon_min, lon_max, int(n_lon))
+        n_lat = int(n_lat)
+        n_lon = int(n_lon)
+        n_depth = int(n_depth)
 
+        lats = np.linspace(lat_min, lat_max, n_lat)
+        lons = np.linspace(lon_min, lon_max, n_lon)
+        lon_step = lons[1] - lons[0] if n_lon > 1 else 0.0
+
+        use_depth = n_depth > 1
+        if use_depth:
+            depth_min = float(region.get("depth_min", 0.0))
+            depth_max = float(region.get("depth_max", 100.0))
+            depths = np.linspace(depth_min, depth_max, n_depth)
+        else:
+            depths = np.array([None])
+
+        n_horiz = n_lat * n_lon  # nodes per depth layer
         g = nx.Graph()
 
-        # Add nodes laid out on the grid.
-        for i, lat in enumerate(lats):
-            for j, lon in enumerate(lons):
-                node_id = i * n_lon + j
-                g.add_node(node_id, lat=float(lat), lon=float(lon))
+        # Add nodes.  For "triangular", odd rows are shifted by half a
+        # lon-step to form equilateral triangles.
+        triangular = connectivity == "triangular"
+        for k, dep in enumerate(depths):
+            for i, lat in enumerate(lats):
+                for j, lon in enumerate(lons):
+                    node_id = k * n_horiz + i * n_lon + j
+                    if triangular and i % 2 == 1:
+                        lon_shifted = float(lon) + 0.5 * lon_step
+                    else:
+                        lon_shifted = float(lon)
+                    attrs = {"lat": float(lat), "lon": lon_shifted}
+                    if use_depth:
+                        attrs["depth"] = float(dep)
+                    g.add_node(node_id, **attrs)
 
-        # Add 4-neighbour edges with great-circle distances.
-        for i in range(n_lat):
-            for j in range(n_lon):
-                node_id = i * n_lon + j
-                if i + 1 < n_lat:
-                    nid_down = (i + 1) * n_lon + j
-                    cls._add_edge_with_distance(g, node_id, nid_down, speed_mps)
-                if j + 1 < n_lon:
-                    nid_right = i * n_lon + (j + 1)
-                    cls._add_edge_with_distance(g, node_id, nid_right, speed_mps)
+        # Add edges depending on connectivity.
+        for k in range(n_depth if use_depth else 1):
+            base = k * n_horiz
+            for i in range(n_lat):
+                for j in range(n_lon):
+                    node_id = base + i * n_lon + j
+
+                    # Horizontal neighbour (shared by all modes).
+                    if j + 1 < n_lon:
+                        cls._add_edge_with_distance(g, node_id, base + i * n_lon + (j + 1), speed_mps)
+
+                    # Vertical neighbour (shared by all modes).
+                    if i + 1 < n_lat:
+                        cls._add_edge_with_distance(g, node_id, base + (i + 1) * n_lon + j, speed_mps)
+
+                    if connectivity == "8":
+                        # Diagonal neighbours.
+                        if i + 1 < n_lat and j + 1 < n_lon:
+                            cls._add_edge_with_distance(g, node_id, base + (i + 1) * n_lon + (j + 1), speed_mps)
+                        if i + 1 < n_lat and j - 1 >= 0:
+                            cls._add_edge_with_distance(g, node_id, base + (i + 1) * n_lon + (j - 1), speed_mps)
+
+                    elif triangular:
+                        if i + 1 < n_lat:
+                            if i % 2 == 0:
+                                if j + 1 < n_lon:
+                                    cls._add_edge_with_distance(
+                                        g, node_id, base + (i + 1) * n_lon + (j + 1), speed_mps
+                                    )
+                            else:
+                                if j - 1 >= 0:
+                                    cls._add_edge_with_distance(
+                                        g, node_id, base + (i + 1) * n_lon + (j - 1), speed_mps
+                                    )
+
+            # Vertical (depth) edges connecting this layer to the next one.
+            if use_depth and k + 1 < n_depth:
+                next_base = (k + 1) * n_horiz
+                for i in range(n_lat):
+                    for j in range(n_lon):
+                        cls._add_edge_with_distance(
+                            g,
+                            base + i * n_lon + j,
+                            next_base + i * n_lon + j,
+                            speed_mps,
+                        )
 
         return cls(graph=g, speed_mps=float(speed_mps))
 
@@ -108,6 +187,9 @@ class WaypointGraph:
 
         - the ``k`` nearest neighbours for each node (if ``k`` is provided), or
         - all nodes within a given great-circle distance ``radius`` (meters).
+
+        If the *region* contains ``depth_min`` and ``depth_max``, nodes are
+        sampled uniformly in 3-D and the ``depth`` attribute is stored.
         """
         if k is None and radius is None:
             raise ValueError("Either k or radius must be provided for random_geometric.")
@@ -119,17 +201,26 @@ class WaypointGraph:
         lon_min = float(region["lon_min"])
         lon_max = float(region["lon_max"])
 
+        use_depth = "depth_min" in region and "depth_max" in region
+
         lats = rng.uniform(lat_min, lat_max, int(n_nodes))
         lons = rng.uniform(lon_min, lon_max, int(n_nodes))
 
         g = nx.Graph()
-        for node_id, (lat, lon) in enumerate(zip(lats, lons)):
-            g.add_node(node_id, lat=float(lat), lon=float(lon))
-
-        coords = np.column_stack([lats, lons])
+        if use_depth:
+            depth_min = float(region["depth_min"])
+            depth_max = float(region["depth_max"])
+            node_depths = rng.uniform(depth_min, depth_max, int(n_nodes))
+            for node_id, (lat, lon, dep) in enumerate(zip(lats, lons, node_depths)):
+                g.add_node(node_id, lat=float(lat), lon=float(lon), depth=float(dep))
+            coords = np.column_stack([lats, lons, node_depths])
+        else:
+            for node_id, (lat, lon) in enumerate(zip(lats, lons)):
+                g.add_node(node_id, lat=float(lat), lon=float(lon))
+            coords = np.column_stack([lats, lons])
 
         if k is not None:
-            # Connect to k nearest neighbours in Euclidean lat-lon space
+            # Connect to k nearest neighbours in Euclidean lat-lon(-depth) space
             # (sufficient for small regions).
             from sklearn.neighbors import NearestNeighbors  # optional dependency
 
@@ -144,23 +235,24 @@ class WaypointGraph:
                         continue
                     cls._add_edge_with_distance(g, i, j, speed_mps)
         else:
-            # Radius-based connections using great-circle distance.
+            # Radius-based connections using great-circle (+ depth) distance.
             rad_m = float(radius)
             n = coords.shape[0]
             for i in range(n):
                 for j in range(i + 1, n):
-                    d = cls._haversine_m(
-                        float(coords[i, 0]),
-                        float(coords[i, 1]),
-                        float(coords[j, 0]),
-                        float(coords[j, 1]),
+                    d_args: dict = dict(
+                        lat1_deg=float(coords[i, 0]),
+                        lon1_deg=float(coords[i, 1]),
+                        lat2_deg=float(coords[j, 0]),
+                        lon2_deg=float(coords[j, 1]),
                     )
+                    if use_depth:
+                        d_args["depth1_m"] = float(coords[i, 2])
+                        d_args["depth2_m"] = float(coords[j, 2])
+                    d = cls._haversine_m(**d_args)
                     if d <= rad_m:
                         cls._add_edge(g, i, j, d, speed_mps)
 
-        # Ensure the graph is connected; if not, callers may wish to restrict
-        # to the largest component. We do not enforce that here, but we expose
-        # the connected components via NetworkX if needed.
         return cls(graph=g, speed_mps=float(speed_mps))
 
     # ------------------------------------------------------------------
@@ -181,6 +273,16 @@ class WaypointGraph:
     def node_coords(self, node: int) -> Tuple[float, float]:
         data = self.graph.nodes[node]
         return float(data["lat"]), float(data["lon"])
+
+    def node_depth(self, node: int) -> Optional[float]:
+        """Return the depth of *node* in meters, or ``None`` if not set."""
+        d = self.graph.nodes[node].get("depth")
+        return float(d) if d is not None else None
+
+    @property
+    def has_depth(self) -> bool:
+        """``True`` if any node carries a ``depth`` attribute."""
+        return any("depth" in d for _, d in self.graph.nodes(data=True))
 
     def edge_attributes(self, u: int, v: int) -> Mapping[str, float]:
         return self.graph.edges[u, v]
@@ -227,13 +329,14 @@ class WaypointGraph:
         """
         nodes = []
         for nid, data in self.graph.nodes(data=True):
-            nodes.append(
-                {
-                    "id": int(nid),
-                    "lat": float(data["lat"]),
-                    "lon": float(data["lon"]),
-                }
-            )
+            entry: dict = {
+                "id": int(nid),
+                "lat": float(data["lat"]),
+                "lon": float(data["lon"]),
+            }
+            if "depth" in data:
+                entry["depth"] = float(data["depth"])
+            nodes.append(entry)
 
         edges = []
         for u, v, data in self.graph.edges(data=True):
@@ -264,12 +367,15 @@ class WaypointGraph:
         lon1_deg: float,
         lat2_deg: float,
         lon2_deg: float,
+        depth1_m: Optional[float] = None,
+        depth2_m: Optional[float] = None,
     ) -> float:
         """
-        Great-circle distance in meters using the haversine formula.
+        Distance in meters, optionally including a depth component.
 
-        Assumes a spherical Earth approximation, which is sufficient for the
-        regional domains used in these benchmarks.
+        The horizontal distance uses the haversine (great-circle) formula on a
+        spherical Earth.  When both *depth1_m* and *depth2_m* are provided the
+        result is ``sqrt(haversine**2 + (depth2 - depth1)**2)``.
         """
         r_earth = 6371e3  # meters
         lat1 = np.deg2rad(lat1_deg)
@@ -285,7 +391,12 @@ class WaypointGraph:
             + np.cos(lat1) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
         )
         c = 2.0 * np.arctan2(np.sqrt(a), np.sqrt(1.0 - a))
-        return float(r_earth * c)
+        horiz = float(r_earth * c)
+
+        if depth1_m is not None and depth2_m is not None:
+            dz = float(depth2_m) - float(depth1_m)
+            return float(np.sqrt(horiz**2 + dz**2))
+        return horiz
 
     @classmethod
     def _add_edge_with_distance(
@@ -295,11 +406,14 @@ class WaypointGraph:
         v: int,
         speed_mps: float,
     ) -> None:
-        lat_u = float(g.nodes[u]["lat"])
-        lon_u = float(g.nodes[u]["lon"])
-        lat_v = float(g.nodes[v]["lat"])
-        lon_v = float(g.nodes[v]["lon"])
-        length_m = cls._haversine_m(lat_u, lon_u, lat_v, lon_v)
+        nu, nv = g.nodes[u], g.nodes[v]
+        lat_u, lon_u = float(nu["lat"]), float(nu["lon"])
+        lat_v, lon_v = float(nv["lat"]), float(nv["lon"])
+        dep_u = nu.get("depth")
+        dep_v = nv.get("depth")
+        depth1 = float(dep_u) if dep_u is not None else None
+        depth2 = float(dep_v) if dep_v is not None else None
+        length_m = cls._haversine_m(lat_u, lon_u, lat_v, lon_v, depth1, depth2)
         cls._add_edge(g, u, v, length_m, speed_mps)
 
     @staticmethod

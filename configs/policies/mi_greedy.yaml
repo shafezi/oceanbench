@@ -1,0 +1,13 @@
+policy:
+  type: mi_greedy
+
+planner:
+  type: mi_greedy
+  batch_size_n: 10
+  max_candidates_for_greedy: 1024
+
+mi:
+  X_set: candidate_grid      # candidate_grid | eval_grid | subsample
+  X_subsample:
+    max_points: 500
+  jitter: 1.0e-8

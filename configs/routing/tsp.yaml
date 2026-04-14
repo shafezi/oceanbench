@@ -1,0 +1,5 @@
+routing:
+  backend: ortools            # ortools | networkx | python_tsp
+  mode: open_end_anywhere     # open_end_anywhere | open_fixed_end | closed
+  metric: haversine           # haversine | euclidean | travel_time
+  fixed_end: null             # set {lat: ..., lon: ...} for open_fixed_end

@@ -108,3 +108,44 @@ def evaluate_binney_dense_grid(
     if y_true.shape != y_pred.shape:
         raise ValueError("y_true and y_pred must have the same shape for evaluation.")
     return field_rmse_score(y_true, y_pred, query_points=query_points, include_mae=True)
+
+
+def run_persistent_sampling_comparison(
+    runs: List[Tuple[str, Dict[str, Any]]],
+    *,
+    run_dirs: Optional[List[Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Execute multiple persistent-sampling configs and collect final metrics.
+    """
+    from .runner import run_persistent_sampling
+
+    summaries: list[dict[str, Any]] = []
+    for i, (name, cfg) in enumerate(runs):
+        rd = None
+        if run_dirs is not None and i < len(run_dirs):
+            rd = run_dirs[i]
+        result = run_persistent_sampling(cfg, run_dir=rd)
+        final = dict(result.get("final_metrics", {}))
+        summaries.append(
+            {
+                "name": name,
+                "n_samples": result.get("n_samples"),
+                "n_replans": result.get("n_replans"),
+                "distance": result.get("distance"),
+                "runtime": result.get("total_runtime"),
+                "rmse": final.get("rmse"),
+                "mae": final.get("mae"),
+                "uncertainty_mean_std": final.get("uncertainty_mean_std"),
+                "raw_result": result,
+            }
+        )
+
+    # Sort by RMSE when available.
+    summaries.sort(
+        key=lambda x: float("inf") if x.get("rmse") is None else float(x["rmse"])
+    )
+    return {
+        "n_runs": len(summaries),
+        "summaries": summaries,
+    }

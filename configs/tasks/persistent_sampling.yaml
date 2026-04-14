@@ -1,0 +1,55 @@
+task: persistent_sampling
+
+candidates:
+  type: grid   # grid | random | graph
+  grid:
+    n_lat: 50
+    n_lon: 50
+  max_points: 2500
+  seed: 42
+  subsample_strategy: random
+
+mission:
+  initial_samples: 8
+  max_samples: 400
+  sample_interval_s: 300.0
+  speed_mps: 1.5
+  measurement_noise_std: 0.01
+  start:
+    lat: 25.0
+    lon: -89.0
+
+truth:
+  mode: dynamic_provider          # static | dynamic_provider | dynamic_piecewise
+  time_mode: interpolate          # snap_to_provider | interpolate
+  frame_change_every_samples: 200
+
+replan:
+  trigger: end_of_batch           # end_of_batch | fixed_time | uncertainty_threshold | rho_threshold | combined
+  fixed_time_seconds: 3600.0
+  uncertainty_threshold: 0.25
+  rho_threshold: 0.6
+
+hyperparams:
+  mode: rho_trigger               # fixed | periodic | rho_trigger | continuous
+  rho0: 0.6
+  period: 200
+  on_update: replan_immediately   # replan_immediately | keep_current_plan
+
+noise:
+  mode: fixed                     # fixed | estimate
+  fixed_sigma2: 0.001
+  estimate_method: gp_likelihood  # gp_likelihood | residual | cv
+
+eval:
+  grid:
+    fixed: true
+    n_lat: 120
+    n_lon: 120
+  max_points: 10000
+  subsample_strategy: stratified  # random | stratified
+  times: sequence                 # single | sequence | all_in_window
+  sequence_length: 4
+  error_time: multiple_times      # time_of_prediction | fixed_reference | multiple_times
+  every_n_samples: 20
+  metrics: [rmse, mae, runtime, distance, replans]

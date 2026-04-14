@@ -1,0 +1,55 @@
+# POMCP policy configuration for adaptive sampling.
+
+policy:
+  type: pomcp
+
+pomcp:
+  max_depth: 10
+  discount: 0.95
+  uct_c: 1.0
+
+  action_space: graph_neighbors  # graph_neighbors | knn
+  knn_k: 8
+  include_stay: true
+
+  belief:
+    objective_c: 1.0
+    field_model_type: gp  # gp | sparse_online_gp | svgp
+
+  exploration:
+    strategy: uct  # uct | successive_rejects | ugapeb
+    # Successive Rejects / UGapEb specific:
+    # b: 1.0
+    # epsilon: 0.5
+
+  commitment:
+    strategy: none  # none | fixed_k | ttest | ugapec
+    # fixed_k specific:
+    # k: 3
+    # ttest specific:
+    # p_threshold: 0.05
+    # min_samples: 3
+    # ugapec specific:
+    # delta: 0.1
+    # epsilon: 0.01
+    # b: 1.0
+
+  rollout_schedule:
+    type: constant  # constant | increasing | beta
+    n: 500
+    # increasing specific:
+    # min_n: 100
+    # max_n: 1000
+    # beta specific:
+    # alpha: 2.0
+    # beta_param: 5.0
+    # max_rollouts: 5000
+    # min_per_step: 10
+
+  max_steps: 50
+
+  obs_n_bins: 20
+  obs_lo: -5.0
+  obs_hi: 5.0
+
+seed: 42

@@ -1,0 +1,28 @@
+# Task configuration for AdaPP adaptive sampling.
+
+task: adapp_mapping
+
+graph:
+  type: grid
+  grid:
+    n_lat: 20
+    n_lon: 20
+  connectivity: "4"
+
+robot:
+  speed_mps: 1.0
+
+sampling:
+  measurement_noise_var: 0.01
+
+evaluation:
+  eval_grid_n_lat: 50
+  eval_grid_n_lon: 50
+  max_eval_points: 10000
+
+time_budgets:
+  - 600
+  - 800
+  - 1000
+  - 1200
+  - 1500

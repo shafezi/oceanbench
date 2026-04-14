@@ -47,7 +47,7 @@ def cmd_describe(args: argparse.Namespace) -> int:
 
 def cmd_estimate(args: argparse.Namespace) -> int:
     config = _load_config()
-    provider = __import__("oceanbench.provider", fromlist=["DataProvider"]).DataProvider(config)
+    provider = __import__("oceanbench_data_provider.provider", fromlist=["DataProvider"]).DataProvider(config)
     region = _parse_region(args.region)
     time_range = _parse_time(args.time)
     variables = args.vars.split(",") if args.vars else ["temp", "sal"]
@@ -67,7 +67,7 @@ def cmd_estimate(args: argparse.Namespace) -> int:
 
 def cmd_fetch(args: argparse.Namespace) -> int:
     config = _load_config()
-    provider = __import__("oceanbench.provider", fromlist=["DataProvider"]).DataProvider(config)
+    provider = __import__("oceanbench_data_provider.provider", fromlist=["DataProvider"]).DataProvider(config)
     region = _parse_region(args.region)
     time_range = _parse_time(args.time)
     variables = args.vars.split(",") if args.vars else ["temp", "sal"]

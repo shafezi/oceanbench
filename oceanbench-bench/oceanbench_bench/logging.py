@@ -69,3 +69,25 @@ def append_log(run_dir: Path, event: Mapping[str, Any]) -> None:
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(event, default=str) + "\n")
 
+
+def append_cycle_log(
+    run_dir: Path,
+    *,
+    cycle_index: int,
+    sample_count: int,
+    metrics: Mapping[str, Any],
+    extra: Optional[Mapping[str, Any]] = None,
+) -> None:
+    """
+    Convenience wrapper for per-cycle online-loop logging.
+    """
+    payload: dict[str, Any] = {
+        "event": "cycle",
+        "cycle_index": int(cycle_index),
+        "sample_count": int(sample_count),
+        "metrics": dict(metrics),
+    }
+    if extra is not None:
+        payload["extra"] = dict(extra)
+    append_log(run_dir, payload)
+

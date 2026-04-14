@@ -1,0 +1,104 @@
+name: dlp_comparisons
+
+base:
+  seed: 42
+  scenario:
+    name: dlp_region
+    product_id: hycom_glbv0.08_reanalysis_53x
+    variable: temp
+    region:
+      lat_min: 24.0
+      lat_max: 36.0
+      lon_min: -86.0
+      lon_max: -74.0
+    time_window: [2014-01-01T00:00:00, 2014-01-07T00:00:00]
+  task: persistent_sampling
+  mission:
+    initial_samples: 8
+    max_samples: 200
+    sample_interval_s: 300.0
+    speed_mps: 1.5
+    measurement_noise_std: 0.01
+  candidates:
+    type: grid
+    grid: {n_lat: 40, n_lon: 40}
+    max_points: 1600
+    seed: 42
+  eval:
+    grid: {fixed: true, n_lat: 100, n_lon: 100}
+    max_points: 10000
+    subsample_strategy: stratified
+    times: sequence
+    sequence_length: 4
+    every_n_samples: 20
+  truth:
+    mode: dynamic_provider
+    time_mode: interpolate
+    frame_change_every_samples: 200
+  routing:
+    backend: ortools
+    mode: open_end_anywhere
+    metric: haversine
+  replan:
+    trigger: end_of_batch
+  hyperparams:
+    mode: rho_trigger
+    rho0: 0.6
+    on_update: replan_immediately
+  noise:
+    mode: fixed
+    fixed_sigma2: 0.001
+    estimate_method: gp_likelihood
+
+variants:
+  - name: sogp_dp
+    field_model:
+      backend: sogp_paper
+      params:
+        max_basis_size: 100
+        novelty_threshold: 1.0e-6
+        lengthscale: 1.0
+        variance: 1.0
+    planner:
+      type: mi_dp
+      batch_size_n: 10
+      dp_beam_width: 64
+      max_candidates_for_dp: 256
+    mi:
+      X_set: candidate_grid
+      X_subsample: {max_points: 500}
+      jitter: 1.0e-8
+  - name: svgp_dp
+    field_model:
+      backend: svgp_gpytorch
+      params:
+        n_inducing: 128
+        inducing_strategy: kmeans
+        training_schedule: per_batch
+        fit_iters: 100
+        update_iters: 10
+    planner:
+      type: mi_dp
+      batch_size_n: 10
+      dp_beam_width: 64
+      max_candidates_for_dp: 256
+    mi:
+      X_set: candidate_grid
+      X_subsample: {max_points: 500}
+      jitter: 1.0e-8
+  - name: sogp_greedy
+    field_model:
+      backend: sogp_paper
+      params:
+        max_basis_size: 100
+        novelty_threshold: 1.0e-6
+        lengthscale: 1.0
+        variance: 1.0
+    planner:
+      type: mi_greedy
+      batch_size_n: 10
+      max_candidates_for_greedy: 1024
+    mi:
+      X_set: candidate_grid
+      X_subsample: {max_points: 500}
+      jitter: 1.0e-8

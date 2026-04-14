@@ -81,11 +81,33 @@ def build_eval_grid(
         n_lat = int(n_lat)
         n_lon = int(n_lon)
 
+    # Depth grid (optional).
+    n_depth = eval_cfg.get("grid_n_depth")
+    use_depth = False
+    if n_depth is not None and int(n_depth) > 1 and scenario.depth_range is not None:
+        use_depth = True
+        n_depth = int(n_depth)
+        depth_min, depth_max = scenario.depth_range
+        depth_arr = np.linspace(float(depth_min), float(depth_max), n_depth)
+    elif scenario.depth_range is not None and n_depth is None:
+        # Single depth layer at the midpoint when range is given but no grid size.
+        use_depth = False
+
     lats = np.linspace(lat_min, lat_max, n_lat)
     lons = np.linspace(lon_min, lon_max, n_lon)
-    lat_grid, lon_grid = np.meshgrid(lats, lons, indexing="ij")
-    lat_flat = lat_grid.ravel()
-    lon_flat = lon_grid.ravel()
+
+    if use_depth:
+        lat_grid, lon_grid, dep_grid = np.meshgrid(
+            lats, lons, depth_arr, indexing="ij"
+        )
+        lat_flat = lat_grid.ravel()
+        lon_flat = lon_grid.ravel()
+        dep_flat = dep_grid.ravel()
+    else:
+        lat_grid, lon_grid = np.meshgrid(lats, lons, indexing="ij")
+        lat_flat = lat_grid.ravel()
+        lon_flat = lon_grid.ravel()
+        dep_flat = None
 
     eval_time = _eval_time_from_config(scenario, eval_cfg)
     if eval_time is not None:
@@ -93,15 +115,18 @@ def build_eval_grid(
     else:
         times = None
 
-    qps = QueryPoints(lats=lat_flat, lons=lon_flat, times=times)
+    qps = QueryPoints(lats=lat_flat, lons=lon_flat, times=times, depths=dep_flat)
+    meta: dict[str, Any] = {
+        "grid_n_lat": n_lat,
+        "grid_n_lon": n_lon,
+        "region": dict(region),
+    }
+    if use_depth:
+        meta["grid_n_depth"] = n_depth
     grid = EvalGrid(
         query_points=qps,
         scenario=scenario,
-        metadata={
-            "grid_n_lat": n_lat,
-            "grid_n_lon": n_lon,
-            "region": dict(region),
-        },
+        metadata=meta,
     )
 
     max_points = int(eval_cfg.get("max_points", 10_000))
@@ -143,7 +168,7 @@ def subsample_eval_grid(
     if strategy == "random":
         idx = rng.permutation(n)[:max_points]
     elif strategy == "stratified":
-        stride = int(np.ceil(np.sqrt(n / max_points)))
+        stride = max(1, int(np.ceil(n / max_points)))
         idx = np.arange(0, n, stride)[:max_points]
     else:
         raise ValueError(f"Unknown subsample strategy: {strategy!r}")

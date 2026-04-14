@@ -1,0 +1,19 @@
+# Sweep over POMCP exploration and commitment strategies.
+
+base_config:
+  include:
+    - configs/base.yaml
+    - configs/scenarios/pomcp_region.yaml
+    - configs/tasks/pomcp_sampling.yaml
+    - configs/policies/pomcp.yaml
+
+sweep:
+  pomcp.exploration.strategy:
+    - uct
+    - successive_rejects
+    - ugapeb
+  pomcp.commitment.strategy:
+    - none
+    - fixed_k
+    - ttest
+    - ugapec

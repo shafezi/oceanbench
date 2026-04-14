@@ -10,6 +10,7 @@ from oceanbench_core import (
     Scenario,
     WaypointGraph,
     build_eval_grid,
+    features_from_items,
 )
 from oceanbench_core.sampling import MeasurementItem, h as sampling_fn
 from oceanbench_models.belief.field.covariance_backends import (
@@ -66,17 +67,26 @@ class BinneyMappingTask:
 
         # Construct Scenario.
         region_cfg = scenario_cfg.get("region", {})
+        region: dict[str, float] = {
+            "lat_min": float(region_cfg["lat_min"]),
+            "lat_max": float(region_cfg["lat_max"]),
+            "lon_min": float(region_cfg["lon_min"]),
+            "lon_max": float(region_cfg["lon_max"]),
+        }
+        if "depth_min" in region_cfg and "depth_max" in region_cfg:
+            region["depth_min"] = float(region_cfg["depth_min"])
+            region["depth_max"] = float(region_cfg["depth_max"])
+
+        depth_range = scenario_cfg.get("depth_range")
+        if depth_range is None and "depth_min" in region:
+            depth_range = (region["depth_min"], region["depth_max"])
+
         scenario = Scenario(
             name=scenario_cfg.get("name"),
             variable=scenario_cfg.get("variable", "temp"),
-            region={
-                "lat_min": float(region_cfg["lat_min"]),
-                "lat_max": float(region_cfg["lat_max"]),
-                "lon_min": float(region_cfg["lon_min"]),
-                "lon_max": float(region_cfg["lon_max"]),
-            },
+            region=region,
             time_range=scenario_cfg.get("time_range"),
-            depth_range=scenario_cfg.get("depth_range"),
+            depth_range=depth_range,
             metadata=scenario_cfg.get("metadata", {}),
         )
 
@@ -87,13 +97,18 @@ class BinneyMappingTask:
         seed = int(graph_cfg.get("seed", 0))
 
         if graph_type == "grid":
-            n_lat = int(graph_cfg.get("grid", {}).get("n_lat", 10))
-            n_lon = int(graph_cfg.get("grid", {}).get("n_lon", 10))
+            grid_cfg = graph_cfg.get("grid", {})
+            n_lat = int(grid_cfg.get("n_lat", 10))
+            n_lon = int(grid_cfg.get("n_lon", 10))
+            n_depth = int(grid_cfg.get("n_depth", 1))
+            connectivity = str(grid_cfg.get("connectivity", "4"))
             graph = WaypointGraph.grid(
                 region=scenario.region,
                 n_lat=n_lat,
                 n_lon=n_lon,
+                n_depth=n_depth,
                 speed_mps=speed_mps,
+                connectivity=connectivity,
                 seed=seed,
             )
         elif graph_type == "random_geometric":
@@ -124,13 +139,17 @@ class BinneyMappingTask:
         )
 
         # Objective.
-        # Features for Y are taken from the evaluation grid as [lat, lon(, time)].
+        # Features for Y are taken from the evaluation grid as
+        # [lat, lon(, depth)(, time)].
         Y = np.column_stack(
             [
                 np.asarray(eval_grid.query_points.lats, dtype=float),
                 np.asarray(eval_grid.query_points.lons, dtype=float),
             ]
         )
+        if eval_grid.query_points.depths is not None:
+            d = np.asarray(eval_grid.query_points.depths, dtype=float)
+            Y = np.column_stack([Y, d])
         if eval_grid.query_points.times is not None:
             # Represent time as seconds since epoch for kernel backends.
             t = np.asarray(eval_grid.query_points.times, dtype="datetime64[ns]").astype("int64") / 1e9
@@ -190,22 +209,5 @@ class BinneyMappingTask:
         The convention matches the covariance backends: columns are at least
         [lat, lon] and optionally a time column (seconds since epoch).
         """
-        if not items:
-            return np.zeros((0, 2), dtype=float)
-
-        lats = np.array([it.lat for it in items], dtype=float)
-        lons = np.array([it.lon for it in items], dtype=float)
-        feats = [lats, lons]
-
-        if any(it.time is not None for it in items):
-            times = []
-            for it in items:
-                if it.time is None:
-                    times.append(np.datetime64("NaT", "ns"))
-                else:
-                    times.append(np.datetime64(it.time, "ns"))
-            t_arr = np.array(times, dtype="datetime64[ns]").astype("int64") / 1e9
-            feats.append(t_arr.astype(float))
-
-        return np.column_stack(feats)
+        return features_from_items(items)
 

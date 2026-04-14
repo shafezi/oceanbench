@@ -1,0 +1,14 @@
+# Scenario for POMCP adaptive sampling experiments.
+
+name: pomcp_gulf_region
+variable: temp
+region:
+  lat_min: 22.0
+  lat_max: 28.0
+  lon_min: -92.0
+  lon_max: -86.0
+time_range:
+  - "2014-01-01T00:00:00"
+  - "2014-01-07T00:00:00"
+metadata:
+  product_id: copernicus_phy_reanalysis_001_030

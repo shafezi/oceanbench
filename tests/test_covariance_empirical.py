@@ -26,7 +26,7 @@ def test_empirical_covariance_basic_properties():
     # Inject some NaNs to test robustness.
     values[0, 0] = np.nan
 
-    cov = EmpiricalCovarianceBackend(eval_grid=grid, values=values, config={"use_anomalies": True})
+    cov = EmpiricalCovarianceBackend.from_values(eval_grid=grid, values=values, config={"use_anomalies": True})
 
     X = np.column_stack([qp.lats, qp.lons])
     K = cov.cov_block(X, X)

@@ -42,17 +42,25 @@ class EmpiricalCovarianceBackend(CovarianceBackend):
     """
     Empirical covariance backend based on historical truth snapshots.
 
-    This implementation focuses on providing a covariance model over the dense
-    evaluation grid Y. Cross-covariances with arbitrary sample locations are
-    approximated by snapping those locations to their nearest evaluation-grid
-    neighbours in (lat, lon) space. This choice is explicit and may be
-    revisited in future refinements.
+    Covariance between arbitrary sets of (lat, lon[, time]) locations is
+    computed by evaluating truth at those exact locations for each historical
+    snapshot, then computing the sample cross-covariance.  When a time
+    column is present in the feature matrix, each query point is matched to
+    the snapshot whose time is closest, preserving temporal correlation
+    structure (Binney et al. 2013, Sec 7.3, Fig. 9).
+
+    For the evaluation grid Y, snapshot values are precomputed at
+    construction time and cached.  For arbitrary sample locations, truth is
+    queried lazily via the stored OceanTruthField, with results cached per
+    unique location set.
     """
 
     def __init__(
         self,
         eval_grid: EvalGrid,
-        values: ArrayLike,
+        truth: OceanTruthField,
+        snapshot_times: np.ndarray,
+        eval_values: np.ndarray,
         *,
         config: Optional[Mapping[str, Any]] = None,
     ) -> None:
@@ -61,15 +69,20 @@ class EmpiricalCovarianceBackend(CovarianceBackend):
         ----------
         eval_grid:
             Evaluation grid defining the target set Y (size M).
-        values:
-            Array of shape (K, M) with K snapshots of truth values on Y.
+        truth:
+            OceanTruthField providing interpolated truth at arbitrary locations.
+        snapshot_times:
+            Array of shape (K,) with the K snapshot times (datetime64[ns]).
+        eval_values:
+            Array of shape (K, M) with truth values on Y for each snapshot.
+            If use_anomalies is True, these should be raw (un-centred) values;
+            anomaly subtraction is applied internally.
         config:
             Empirical covariance configuration mapping.
         """
-        if values.ndim != 2:
-            raise ValueError("values must have shape (n_snapshots, n_points).")
-
         self._eval_grid = eval_grid
+        self._truth = truth
+        self._snapshot_times = np.asarray(snapshot_times, dtype="datetime64[ns]")
         self._cfg = EmpiricalCovConfig(
             window_days=int((config or {}).get("window_days", 30)),
             stride=str((config or {}).get("stride", "1d")),
@@ -77,29 +90,60 @@ class EmpiricalCovarianceBackend(CovarianceBackend):
             use_anomalies=bool((config or {}).get("use_anomalies", True)),
         )
 
-        # Handle NaNs robustly by simple imputation with the per-location mean.
-        vals = np.asarray(values, dtype=float)
-        if self._cfg.use_anomalies:
-            mean_per_point = np.nanmean(vals, axis=0, keepdims=True)
-            vals = vals - mean_per_point
+        # Determine how many spatial dimensions the eval grid has.
+        # Column order convention: [lat, lon, (depth), (time)].
+        self._include_depth = eval_grid.query_points.depths is not None
+        self._n_space_dims = 3 if self._include_depth else 2
 
-        nan_mask = ~np.isfinite(vals)
-        if np.any(nan_mask):
-            col_means = np.nanmean(vals, axis=0)
-            vals = np.where(nan_mask, np.broadcast_to(col_means, vals.shape), vals)
+        # Preprocess eval grid values: anomalies + NaN imputation.
+        self._eval_values = self._preprocess(np.asarray(eval_values, dtype=float))
 
-        self._values = vals  # shape (K, M)
-        # Sample covariance Σ_YY over evaluation grid Y.
-        self._cov_yy = np.cov(self._values, rowvar=False, bias=False)
-
-        # Precompute evaluation grid coordinates for nearest-neighbour snapping.
-        qp = eval_grid.query_points
-        self._eval_lats = np.asarray(qp.lats, dtype=float)
-        self._eval_lons = np.asarray(qp.lons, dtype=float)
+        # Cache for lazily evaluated snapshot values at arbitrary locations.
+        # Key: bytes of spatial coordinate arrays → values array (K, N).
+        self._query_cache: dict[Any, np.ndarray] = {}
 
     # ------------------------------------------------------------------
-    # Construction from provider
+    # Construction helpers
     # ------------------------------------------------------------------
+
+    @classmethod
+    def from_values(
+        cls,
+        eval_grid: EvalGrid,
+        values: ArrayLike,
+        *,
+        config: Optional[Mapping[str, Any]] = None,
+    ) -> "EmpiricalCovarianceBackend":
+        """
+        Build from pre-computed snapshot values (for testing or when
+        truth has already been evaluated externally).
+
+        The resulting backend can compute ``cov_block`` for feature
+        matrices that correspond to the eval grid, but cannot lazily
+        query truth at arbitrary locations (no OceanTruthField).
+        """
+        values = np.asarray(values, dtype=float)
+        if values.ndim != 2:
+            raise ValueError("values must have shape (n_snapshots, n_points).")
+        K = values.shape[0]
+        # Dummy snapshot times (one per row).
+        snapshot_times = np.arange(K).astype("datetime64[D]").astype("datetime64[ns]")
+
+        class _NullTruth:
+            """Placeholder that raises if lazily queried."""
+            def query_array(self, *a: Any, **kw: Any) -> np.ndarray:
+                raise RuntimeError(
+                    "EmpiricalCovarianceBackend built via from_values() "
+                    "cannot query truth at arbitrary locations."
+                )
+
+        return cls(
+            eval_grid=eval_grid,
+            truth=_NullTruth(),  # type: ignore[arg-type]
+            snapshot_times=snapshot_times,
+            eval_values=values,
+            config=config,
+        )
 
     @classmethod
     def from_provider(
@@ -110,13 +154,11 @@ class EmpiricalCovarianceBackend(CovarianceBackend):
         config: Mapping[str, Any],
     ) -> "EmpiricalCovarianceBackend":
         """
-        Build an empirical covariance backend using the DataProvider and scenario.
+        Build an empirical covariance backend using the DataProvider.
 
-        This method:
-          - selects a window of historical times before the scenario start,
-          - sub-samples times according to the configured stride and cap,
-          - evaluates truth on the evaluation grid for each snapshot,
-          - constructs an EmpiricalCovarianceBackend from the resulting matrix.
+        Fetches a window of historical snapshots and evaluates truth on the
+        evaluation grid.  The OceanTruthField is retained so that
+        ``cov_block`` can lazily query truth at arbitrary sample locations.
         """
         if eval_grid.scenario is None:
             raise ValueError("EvalGrid.scenario must be set for empirical covariance.")
@@ -140,7 +182,6 @@ class EmpiricalCovarianceBackend(CovarianceBackend):
         try:
             stride = np.timedelta64(cfg.stride)
         except Exception:
-            # Fall back to daily stride if parsing fails.
             stride = np.timedelta64(1, "D")
 
         times: list[np.datetime64] = []
@@ -152,8 +193,6 @@ class EmpiricalCovarianceBackend(CovarianceBackend):
         if not times:
             raise RuntimeError("No historical snapshots available for empirical covariance.")
 
-        # Use the provider to fetch a dataset covering the historical window.
-        # We assume the provider follows the DataProvider API.
         region = {
             "lon": [
                 float(scenario.region["lon_min"]),
@@ -178,8 +217,9 @@ class EmpiricalCovarianceBackend(CovarianceBackend):
         )
         truth = OceanTruthField(dataset=ds, variable=variable, scenario=scenario)
 
+        # Evaluate truth on the eval grid for each snapshot.
         qp_base = eval_grid.query_points
-        values = []
+        eval_values = []
         for t_snap in times:
             qpt = QueryPoints(
                 lats=qp_base.lats,
@@ -189,56 +229,175 @@ class EmpiricalCovarianceBackend(CovarianceBackend):
                 metadata=qp_base.metadata,
             )
             arr = truth.query_array(qpt, method="linear", bounds_mode="nan")
-            values.append(arr.reshape(-1))
+            eval_values.append(arr.reshape(-1))
 
-        values_arr = np.stack(values, axis=0)  # shape (K, M)
-        return cls(eval_grid=eval_grid, values=values_arr, config=config)
+        snapshot_times = np.array(times, dtype="datetime64[ns]")
+        eval_values_arr = np.stack(eval_values, axis=0)  # shape (K, M)
+
+        return cls(
+            eval_grid=eval_grid,
+            truth=truth,
+            snapshot_times=snapshot_times,
+            eval_values=eval_values_arr,
+            config=config,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _preprocess(self, vals: np.ndarray) -> np.ndarray:
+        """Apply anomaly subtraction and NaN imputation."""
+        vals = vals.copy()
+        if self._cfg.use_anomalies:
+            mean_per_point = np.nanmean(vals, axis=0, keepdims=True)
+            vals = vals - mean_per_point
+
+        nan_mask = ~np.isfinite(vals)
+        if np.any(nan_mask):
+            col_means = np.nanmean(vals, axis=0)
+            vals = np.where(nan_mask, np.broadcast_to(col_means, vals.shape), vals)
+        return vals
+
+    def _query_snapshots_at(
+        self,
+        lats: np.ndarray,
+        lons: np.ndarray,
+        depths: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """
+        Evaluate truth at (lats, lons[, depths]) for every snapshot time.
+
+        Returns array of shape (K, N) where K is the number of snapshots
+        and N = len(lats).  Results are cached by coordinate arrays.
+        """
+        cache_parts = [lats.tobytes(), lons.tobytes()]
+        if depths is not None:
+            cache_parts.append(depths.tobytes())
+        cache_key = tuple(cache_parts)
+        if cache_key in self._query_cache:
+            return self._query_cache[cache_key]
+
+        n = lats.size
+        rows = []
+        for t_snap in self._snapshot_times:
+            qpt = QueryPoints(
+                lats=lats,
+                lons=lons,
+                times=np.full(n, t_snap, dtype="datetime64[ns]"),
+                depths=depths,
+            )
+            arr = self._truth.query_array(qpt, method="linear", bounds_mode="nan")
+            rows.append(arr.reshape(-1))
+
+        vals = self._preprocess(np.stack(rows, axis=0))  # (K, N)
+        self._query_cache[cache_key] = vals
+        return vals
+
+    def _snapshot_values_for_features(self, X: np.ndarray) -> np.ndarray:
+        """
+        Get snapshot-based values for a feature matrix X.
+
+        Column layout: ``[lat, lon, (depth), (time)]``.
+        The number of leading spatial columns is ``self._n_space_dims``
+        (2 for lat/lon, 3 when depth is included).
+
+        If X has a time column (after spatial dims), each point is matched
+        to its nearest snapshot.  Otherwise, all snapshots are used.
+        """
+        lats = X[:, 0].copy()
+        lons = X[:, 1].copy()
+        nsd = self._n_space_dims
+        depths = X[:, 2].copy() if nsd >= 3 else None
+        has_time = X.shape[1] > nsd
+
+        # Query truth at the exact spatial locations for every snapshot.
+        all_vals = self._query_snapshots_at(lats, lons, depths)  # (K, N)
+
+        if not has_time:
+            return all_vals
+
+        # Time-aware: for each query point, find the nearest snapshot and
+        # shift snapshot indices to preserve temporal correlation structure.
+        time_seconds = X[:, nsd]  # seconds since epoch
+        snap_seconds = self._snapshot_times.astype("int64").astype(float) / 1e9
+
+        nearest_snap = np.argmin(
+            np.abs(time_seconds[None, :] - snap_seconds[:, None]),
+            axis=0,
+        )
+
+        K = all_vals.shape[0]
+        N = all_vals.shape[1]
+        k_indices = np.arange(K)[:, None]  # (K, 1)
+        shifted = np.clip(k_indices + nearest_snap[None, :], 0, K - 1)  # (K, N)
+        vals_shifted = all_vals[shifted, np.arange(N)[None, :]]
+        return vals_shifted
 
     # ------------------------------------------------------------------
     # Core CovarianceBackend API
     # ------------------------------------------------------------------
 
+    def _get_values(self, X: np.ndarray) -> np.ndarray:
+        """
+        Get preprocessed snapshot values for feature matrix X.
+
+        If X corresponds exactly to the eval grid, return the cached
+        eval_values.  Otherwise, query truth at the exact locations.
+        """
+        X = np.atleast_2d(np.asarray(X, dtype=float))
+        lats = X[:, 0]
+        lons = X[:, 1]
+        nsd = self._n_space_dims
+
+        # Check if this is the eval grid (fast path).
+        eval_lats = np.asarray(self._eval_grid.query_points.lats, dtype=float)
+        eval_lons = np.asarray(self._eval_grid.query_points.lons, dtype=float)
+        spatial_match = (
+            lats.shape[0] == eval_lats.shape[0]
+            and np.allclose(lats, eval_lats, atol=1e-8)
+            and np.allclose(lons, eval_lons, atol=1e-8)
+        )
+        if spatial_match and nsd >= 3 and self._eval_grid.query_points.depths is not None:
+            eval_depths = np.asarray(self._eval_grid.query_points.depths, dtype=float)
+            spatial_match = spatial_match and np.allclose(X[:, 2], eval_depths, atol=1e-8)
+
+        if spatial_match and X.shape[1] <= nsd:
+            return self._eval_values
+
+        return self._snapshot_values_for_features(X)
+
     def cov_block(self, Xa: ArrayLike, Xb: ArrayLike) -> ArrayLike:
         """
-        Approximate covariance block Σ(S, T) by snapping S and T to the nearest
-        evaluation-grid locations.
+        Compute empirical cross-covariance Σ(Xa, Xb).
 
-        Xa, Xb are feature matrices whose first two dimensions are (lat, lon).
+        Evaluates truth at the exact (lat, lon) locations of Xa and Xb
+        for each historical snapshot, then computes the sample
+        cross-covariance.
         """
         Xa = np.atleast_2d(np.asarray(Xa, dtype=float))
         Xb = np.atleast_2d(np.asarray(Xb, dtype=float))
 
-        idx_a = self._nearest_eval_indices(Xa[:, 0], Xa[:, 1])
-        idx_b = self._nearest_eval_indices(Xb[:, 0], Xb[:, 1])
-        return self._cov_yy[np.ix_(idx_a, idx_b)]
+        Va = self._get_values(Xa)  # (K, Na)
+        Vb = self._get_values(Xb)  # (K, Nb)
+
+        K = Va.shape[0]
+        # Sample cross-covariance: (1/(K-1)) * (Va - mean_a)^T @ (Vb - mean_b)
+        Va_centred = Va - np.nanmean(Va, axis=0, keepdims=True)
+        Vb_centred = Vb - np.nanmean(Vb, axis=0, keepdims=True)
+
+        # Handle any remaining NaNs by treating them as zero (neutral).
+        Va_centred = np.where(np.isfinite(Va_centred), Va_centred, 0.0)
+        Vb_centred = np.where(np.isfinite(Vb_centred), Vb_centred, 0.0)
+
+        denom = max(K - 1, 1)
+        return (Va_centred.T @ Vb_centred) / denom
 
     def diag_cov(self, X: ArrayLike) -> ArrayLike:
         X = np.atleast_2d(np.asarray(X, dtype=float))
-        idx = self._nearest_eval_indices(X[:, 0], X[:, 1])
-        return np.asarray(np.diag(self._cov_yy)[idx], dtype=float)
-
-    # ------------------------------------------------------------------
-    # Nearest-neighbour helper
-    # ------------------------------------------------------------------
-
-    def _nearest_eval_indices(
-        self,
-        lats: ArrayLike,
-        lons: ArrayLike,
-    ) -> np.ndarray:
-        lats = np.asarray(lats, dtype=float).reshape(-1)
-        lons = np.asarray(lons, dtype=float).reshape(-1)
-
-        # Simple Euclidean nearest neighbour search in (lat, lon) space.
-        # For moderate grid sizes this is adequate; can be replaced by a
-        # dedicated spatial index if needed later.
-        lat_grid = self._eval_lats[None, :]
-        lon_grid = self._eval_lons[None, :]
-
-        lat_q = lats[:, None]
-        lon_q = lons[:, None]
-
-        d2 = (lat_q - lat_grid) ** 2 + (lon_q - lon_grid) ** 2
-        idx = np.argmin(d2, axis=1)
-        return idx.astype(int)
-
+        V = self._get_values(X)  # (K, N)
+        V_centred = V - np.nanmean(V, axis=0, keepdims=True)
+        V_centred = np.where(np.isfinite(V_centred), V_centred, 0.0)
+        K = V.shape[0]
+        denom = max(K - 1, 1)
+        return np.sum(V_centred ** 2, axis=0) / denom

@@ -1,0 +1,14 @@
+policy:
+  type: mi_dp
+
+planner:
+  type: mi_dp
+  batch_size_n: 10
+  dp_beam_width: 64
+  max_candidates_for_dp: 256
+
+mi:
+  X_set: candidate_grid      # candidate_grid | eval_grid | subsample
+  X_subsample:
+    max_points: 500
+  jitter: 1.0e-8

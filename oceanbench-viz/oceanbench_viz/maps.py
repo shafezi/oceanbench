@@ -7,7 +7,7 @@ All functions accept NumPy arrays; coordinates can be 1D (lat, lon) or 2D grids.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -148,6 +148,185 @@ def plot_truth_prediction_uncertainty(
             ax.scatter(obs_lons, obs_lats, s=20, c="k", marker="x", label="observations")
             ax.legend()
 
+    plt.tight_layout()
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
+def plot_map_sequence(
+    *,
+    lats: np.ndarray,
+    lons: np.ndarray,
+    truth_list: Sequence[np.ndarray],
+    pred_list: Sequence[np.ndarray],
+    std_list: Optional[Sequence[np.ndarray]] = None,
+    times: Optional[Sequence[Any]] = None,
+    max_frames: int = 6,
+    figsize_per_frame: Tuple[float, float] = (4.0, 3.2),
+    save_path: Optional[Union[str, Path]] = None,
+    show: bool = True,
+) -> None:
+    """
+    Plot truth / prediction / uncertainty / error over multiple time frames.
+    """
+    _check_mpl()
+    n_total = min(len(truth_list), len(pred_list))
+    n_frames = min(max_frames, n_total)
+    if n_frames <= 0:
+        raise ValueError("plot_map_sequence requires at least one frame.")
+
+    idx = np.linspace(0, n_total - 1, n_frames).astype(int)
+    n_cols = n_frames
+    n_rows = 4 if std_list is not None else 3
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(figsize_per_frame[0] * n_cols, figsize_per_frame[1] * n_rows),
+        squeeze=False,
+    )
+
+    for c, i in enumerate(idx):
+        truth = np.asarray(truth_list[i], dtype=float).ravel()
+        pred = np.asarray(pred_list[i], dtype=float).ravel()
+        if truth.size != pred.size:
+            raise ValueError("Each truth/pred frame pair must have matching size.")
+        title_t = f"t={times[i]}" if times is not None and i < len(times) else f"frame {i}"
+
+        ax = axes[0, c]
+        sc = ax.scatter(lons, lats, c=truth, cmap="viridis")
+        ax.set_title(f"Truth ({title_t})")
+        plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+
+        ax = axes[1, c]
+        sc = ax.scatter(lons, lats, c=pred, cmap="viridis")
+        ax.set_title(f"Prediction ({title_t})")
+        plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+
+        row_err = 2
+        if std_list is not None:
+            std = np.asarray(std_list[i], dtype=float).ravel()
+            if std.size != truth.size:
+                raise ValueError("Each std frame must match truth frame size.")
+            ax = axes[2, c]
+            sc = ax.scatter(lons, lats, c=std, cmap="plasma")
+            ax.set_title(f"Uncertainty ({title_t})")
+            plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+            row_err = 3
+
+        err = np.abs(pred - truth)
+        ax = axes[row_err, c]
+        sc = ax.scatter(lons, lats, c=err, cmap="Reds")
+        ax.set_title(f"|Error| ({title_t})")
+        plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+
+    plt.tight_layout()
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
+def plot_field_depth_slices(
+    values: np.ndarray,
+    lats: np.ndarray,
+    lons: np.ndarray,
+    depths: np.ndarray,
+    *,
+    n_slices: int = 4,
+    title: str = "Field",
+    cmap: str = "viridis",
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    figsize_per_slice: Tuple[float, float] = (4.0, 3.5),
+    save_path: Optional[Union[str, Path]] = None,
+    show: bool = True,
+) -> None:
+    """
+    Plot a 3-D field as multiple depth-slice panels.
+
+    Parameters
+    ----------
+    values, lats, lons, depths:
+        1-D arrays of the same length.
+    n_slices:
+        Number of depth slices to show.
+    """
+    _check_mpl()
+    values = np.asarray(values, dtype=float).ravel()
+    lats = np.asarray(lats, dtype=float).ravel()
+    lons = np.asarray(lons, dtype=float).ravel()
+    depths = np.asarray(depths, dtype=float).ravel()
+
+    unique_depths = np.unique(depths)
+    if len(unique_depths) <= n_slices:
+        slice_depths = unique_depths
+    else:
+        idx = np.linspace(0, len(unique_depths) - 1, n_slices).astype(int)
+        slice_depths = unique_depths[idx]
+
+    n = len(slice_depths)
+    fig, axes = plt.subplots(
+        1, n,
+        figsize=(figsize_per_slice[0] * n, figsize_per_slice[1]),
+        squeeze=False,
+    )
+
+    if vmin is None:
+        vmin = float(np.nanmin(values))
+    if vmax is None:
+        vmax = float(np.nanmax(values))
+
+    for col, d in enumerate(slice_depths):
+        ax = axes[0, col]
+        mask = np.isclose(depths, d, atol=1e-6)
+        if not mask.any():
+            ax.axis("off")
+            continue
+        sc = ax.scatter(
+            lons[mask], lats[mask], c=values[mask],
+            cmap=cmap, vmin=vmin, vmax=vmax, s=10,
+        )
+        ax.set_title(f"{title}\ndepth={d:.1f}m")
+        ax.set_xlabel("Longitude")
+        ax.set_ylabel("Latitude")
+        plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+
+    plt.tight_layout()
+    if save_path is not None:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
+def plot_metric_curves(
+    metrics_history: Sequence[Mapping[str, Any]],
+    *,
+    x_key: str = "sample_count",
+    keys: Sequence[str] = ("rmse", "mae", "uncertainty_mean_std"),
+    figsize: Tuple[float, float] = (8.0, 4.0),
+    save_path: Optional[Union[str, Path]] = None,
+    show: bool = True,
+) -> None:
+    """
+    Plot metric curves over mission progress.
+    """
+    _check_mpl()
+    if len(metrics_history) == 0:
+        raise ValueError("metrics_history is empty.")
+    xs = np.array([float(m.get(x_key, i)) for i, m in enumerate(metrics_history)], dtype=float)
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    for key in keys:
+        ys = np.array([float(m.get(key, np.nan)) for m in metrics_history], dtype=float)
+        ax.plot(xs, ys, marker="o", label=str(key))
+    ax.set_xlabel(x_key)
+    ax.set_ylabel("metric value")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
     plt.tight_layout()
     if save_path is not None:
         fig.savefig(save_path, dpi=150, bbox_inches="tight")

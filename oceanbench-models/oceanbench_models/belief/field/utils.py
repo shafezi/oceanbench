@@ -47,27 +47,35 @@ def rbf_separable_space_time_kernel(
     lengthscale_space: float = 1.0,
     lengthscale_time: float = 1.0,
     variance: float = 1.0,
+    n_space_dims: int = 2,
 ) -> ArrayLike:
     """
     Simple separable RBF kernel in space and time.
 
-    Assumes features are ordered as [lat, lon, time] where time is already
-    scaled to a reasonable numeric range (e.g., seconds or days).
+    Assumes features are ordered as [lat, lon, (depth,) time] where time
+    is already scaled to a reasonable numeric range (e.g., seconds or days).
+
+    Parameters
+    ----------
+    n_space_dims:
+        Number of leading spatial dimensions (2 for lat/lon, 3 for
+        lat/lon/depth).  The time column is assumed to follow immediately.
     """
 
     X1 = np.atleast_2d(X1).astype(float)
     X2 = np.atleast_2d(X2).astype(float)
 
-    if X1.shape[1] < 3 or X2.shape[1] < 3:
+    min_cols = n_space_dims + 1
+    if X1.shape[1] < min_cols or X2.shape[1] < min_cols:
         raise ValueError(
-            "Expected at least 3 feature dimensions [lat, lon, time] "
-            "for spatio-temporal kernel."
+            f"Expected at least {min_cols} feature dimensions "
+            f"[{n_space_dims} spatial + 1 time] for spatio-temporal kernel."
         )
 
-    X1_space = X1[:, :2]
-    X2_space = X2[:, :2]
-    X1_time = X1[:, 2:3]
-    X2_time = X2[:, 2:3]
+    X1_space = X1[:, :n_space_dims]
+    X2_space = X2[:, :n_space_dims]
+    X1_time = X1[:, n_space_dims:n_space_dims + 1]
+    X2_time = X2[:, n_space_dims:n_space_dims + 1]
 
     dists_sq_space = np.sum(
         (X1_space[:, None, :] - X2_space[None, :, :]) ** 2,

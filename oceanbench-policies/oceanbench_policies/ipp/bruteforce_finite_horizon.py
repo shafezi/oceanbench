@@ -5,7 +5,7 @@ from typing import List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-from oceanbench_core import WaypointGraph, arrival_time
+from oceanbench_core import WaypointGraph, arrival_time, features_from_items
 from oceanbench_core.sampling import MeasurementItem, h as sampling_fn
 from oceanbench_tasks.mapping.binney_objectives import BinneyObjective
 
@@ -24,9 +24,15 @@ class BruteforceConfig:
 @dataclass
 class BruteforceFiniteHorizonPlanner:
     """
-    Brute-force planner enumerating simple paths up to a small depth.
+    Brute-force finite-horizon planner (Binney et al. 2013, Sec 7.1).
 
-    Intended only for toy graphs; callers should guard its use via config.
+    Enumerates all simple paths up to ``max_depth`` edges from s, scores
+    every partial path (not only those reaching the goal t), and returns
+    the best one.  The paper's receding-horizon behaviour — take the first
+    edge, then replan — is handled by the runner, not by this planner.
+
+    With max_depth=1, this reduces to a purely greedy (myopic) planner.
+    Intended only for toy graphs; callers should guard via config.
     """
 
     graph: WaypointGraph
@@ -40,11 +46,15 @@ class BruteforceFiniteHorizonPlanner:
         t: int,
         B: float,
         tau: np.datetime64,
+        X_items: Sequence[MeasurementItem] | None = None,
     ) -> Tuple[Optional[List[int]], List[MeasurementItem], float]:
         nodes = list(self.graph.nodes())
         if len(nodes) > self.config.max_nodes:
             # Too large; decline and let caller skip this baseline.
             return None, [], float("nan")
+
+        X_items = list(X_items or [])
+        X_feats = self._features_from_items(X_items)
 
         best_gain = float("-inf")
         best_path: Optional[List[int]] = None
@@ -52,36 +62,48 @@ class BruteforceFiniteHorizonPlanner:
 
         paths_explored = 0
 
-        def dfs(path: List[int], remaining: float) -> None:
+        def _score_path(path: List[int]) -> None:
+            """Score a (possibly partial) path and update best if improved."""
             nonlocal best_gain, best_path, best_samples, paths_explored
+            if len(path) < 2:
+                return  # need at least one edge to have any samples
+            samples = sampling_fn(
+                path=path,
+                tau=tau,
+                graph=self.graph,
+                sampling_cfg=self.sampling_config,
+            )
+            feats = self._features_from_items(samples)
+            # Use marginal gain relative to prior context X so the planner
+            # works correctly in receding-horizon mode.
+            gain = float(self.objective.marginal_gain(X_feats, feats))
+            if gain > best_gain:
+                best_gain = gain
+                best_path = list(path)
+                best_samples = samples
+            paths_explored += 1
+
+        def dfs(path: List[int], remaining: float) -> None:
+            nonlocal paths_explored
             if paths_explored >= self.config.max_paths:
                 return
 
-            current = path[-1]
-            if current == t:
-                samples = sampling_fn(
-                    path=path,
-                    tau=tau,
-                    graph=self.graph,
-                    sampling_cfg=self.sampling_config,
-                )
-                feats = self._features_from_items(samples)
-                gain = float(self.objective.value(feats))
-                if gain > best_gain:
-                    best_gain = gain
-                    best_path = list(path)
-                    best_samples = samples
-                paths_explored += 1
+            # Score every partial path (the key fix: the paper's brute-force
+            # planner evaluates all paths up to the horizon, not only those
+            # that reach the goal node t).
+            _score_path(path)
+
+            # Stop expanding if we've reached the goal or the depth limit.
+            if path[-1] == t:
+                return
+            if len(path) - 1 >= self.config.max_depth:
                 return
 
-            if len(path) >= self.config.max_depth:
-                return
-
-            for nb in self.graph.graph.neighbors(current):
+            for nb in self.graph.graph.neighbors(path[-1]):
                 nb = int(nb)
                 if nb in path:
                     continue
-                edge = self.graph.edge_attributes(current, nb)
+                edge = self.graph.edge_attributes(path[-1], nb)
                 dt_edge = float(edge["time_s"])
                 if dt_edge > remaining:
                     continue
@@ -94,19 +116,5 @@ class BruteforceFiniteHorizonPlanner:
 
     @staticmethod
     def _features_from_items(items: Sequence[MeasurementItem]) -> np.ndarray:
-        if not items:
-            return np.zeros((0, 2), dtype=float)
-        lats = np.array([it.lat for it in items], dtype=float)
-        lons = np.array([it.lon for it in items], dtype=float)
-        feats = [lats, lons]
-        if any(it.time is not None for it in items):
-            times = []
-            for it in items:
-                if it.time is None:
-                    times.append(np.datetime64("NaT", "ns"))
-                else:
-                    times.append(np.datetime64(it.time, "ns"))
-            t_arr = np.array(times, dtype="datetime64[ns]").astype("int64") / 1e9
-            feats.append(t_arr.astype(float))
-        return np.column_stack(feats)
+        return features_from_items(items)
 

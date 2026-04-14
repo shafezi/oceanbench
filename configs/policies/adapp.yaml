@@ -1,0 +1,37 @@
+# AdaPP policy configuration.
+
+policy:
+  type: adapp
+
+adapp:
+  # Cell decomposition
+  cell_resolution: [10, 10]   # [n_cell_lat, n_cell_lon]
+  initial_variance: 1.0       # κ at t=0
+
+  # DP (Eqs. 8–9)
+  gamma: 0.9
+  dp_max_iters: 100
+  dp_tol: 0.0001
+
+  # Time-constrained planning (Eq. 10)
+  eta: 0.5
+  noise_variance: 0.01
+
+  # Action space
+  connectivity: "4"            # "4" or "8"
+
+  # Robot
+  speed_mps: 1.0
+
+  # Variance backend
+  variance_backend: spgp_fitc  # spgp_fitc (paper) | svgp_gpytorch (baseline)
+  n_pseudo: 50
+
+  # Hyperparameter fitting
+  hyperparams:
+    mode: initial_only         # none | initial_only | periodic
+    periodic_interval: 5
+
+  refit_interval: 1
+
+seed: 42

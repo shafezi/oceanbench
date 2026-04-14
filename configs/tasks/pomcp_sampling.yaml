@@ -1,0 +1,21 @@
+# Task configuration for POMCP adaptive sampling.
+
+task: pomcp_sampling
+
+graph:
+  type: grid
+  grid:
+    n_lat: 12
+    n_lon: 12
+  connectivity: "4"
+
+robot:
+  speed_mps: 1.0
+
+sampling:
+  measurement_noise_var: 0.01
+  max_steps: 50
+
+evaluation:
+  eval_grid_n_lat: 30
+  eval_grid_n_lon: 30

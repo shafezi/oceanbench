@@ -1,0 +1,23 @@
+field_model:
+  backend: svgp_gpytorch
+  params:
+    n_inducing: 128
+    inducing_strategy: kmeans     # fixed_grid | kmeans | learnable | random
+    learn_inducing_locations: true
+    training_schedule: per_batch  # every_step | per_batch | per_replan
+    fit_iters: 120
+    update_iters: 12
+    replan_iters: 40
+    batch_size: 256
+    lr: 0.01
+    include_time: true
+    include_depth: false
+    use_scaling: true
+    lengthscale: 1.0
+    variance: 1.0
+    jitter: 1.0e-6
+
+noise:
+  mode: estimate
+  fixed_sigma2: 0.001
+  estimate_method: gp_likelihood

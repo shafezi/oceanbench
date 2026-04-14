@@ -1,0 +1,15 @@
+# Sweep over time budgets and variance backends for AdaPP.
+
+base_config:
+  include:
+    - configs/base.yaml
+    - configs/scenarios/adapp_region.yaml
+    - configs/tasks/adapp_mapping.yaml
+    - configs/policies/adapp.yaml
+
+sweep:
+  time_budgets:
+    - [600, 800, 1000, 1200, 1500]
+  adapp.variance_backend:
+    - spgp_fitc
+    - svgp_gpytorch

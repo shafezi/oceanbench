@@ -1,0 +1,12 @@
+name: dlp_region
+product_id: hycom_glbv0.08_reanalysis_53x
+variable: temp
+region:
+  lat_min: 22.0
+  lat_max: 28.0
+  lon_min: -92.0
+  lon_max: -86.0
+time_window:
+  - 2014-01-01T00:00:00
+  - 2014-01-07T00:00:00
+depth: null

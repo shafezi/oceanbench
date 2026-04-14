@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-# Stop messages:
-# - "[grg] stop: shortest path time exceeds budget (shortest_time=..., budget=...)"
-# - "[grg] stop: no feasible path found"
-# - "[grg] stop: recursion completed (path_len=..., depth=...)"
+import logging
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-from oceanbench_core import WaypointGraph, arrival_time
+logger = logging.getLogger(__name__)
+
+from oceanbench_core import WaypointGraph, arrival_time, features_from_items
 from oceanbench_core.sampling import MeasurementItem, h as sampling_fn
 from oceanbench_tasks.mapping.binney_objectives import BinneyObjective
 
@@ -47,7 +46,11 @@ class GRGPlanner:
     def _shortest_time_cached(self, s: int, t: int) -> float:
         key = (int(s), int(t))
         if key not in self._dist_cache:
-            self._dist_cache[key] = self.graph.shortest_time(s, t)
+            try:
+                self._dist_cache[key] = self.graph.shortest_time(s, t)
+            except Exception:
+                # Unreachable node (disconnected graph).
+                self._dist_cache[key] = float("inf")
         return self._dist_cache[key]
 
     def _shortest_path_cached(self, s: int, t: int) -> List[int]:
@@ -81,9 +84,10 @@ class GRGPlanner:
         Returns (best_path, best_samples, best_gain).
         """
         if self._shortest_time_cached(s, t) > float(B):
-            print(
-                f"[grg] stop: shortest path time exceeds budget "
-                f"(shortest_time={self._shortest_time_cached(s, t):.3f}, budget={float(B):.3f})"
+            logger.debug(
+                "[grg] stop: shortest path time exceeds budget "
+                "(shortest_time=%.3f, budget=%.3f)",
+                self._shortest_time_cached(s, t), float(B),
             )
             return None, [], float("-inf")
         X_items = list(X_items or [])
@@ -98,10 +102,11 @@ class GRGPlanner:
             depth=self.config.depth,
         )
         if path is None:
-            print("[grg] stop: no feasible path found")
+            logger.debug("[grg] stop: no feasible path found")
         else:
-            print(
-                f"[grg] stop: recursion completed (path_len={len(path)}, depth={self.config.depth})"
+            logger.debug(
+                "[grg] stop: recursion completed (path_len=%d, depth=%d)",
+                len(path), self.config.depth,
             )
         return path, samples, gain
 
@@ -136,9 +141,21 @@ class GRGPlanner:
             gain = self.objective.marginal_gain(X_feats, S0_feats)
             return P0, S0, float(gain)
 
-        best_gain = float("-inf")
-        best_path: Optional[List[int]] = None
-        best_samples: List[MeasurementItem] = []
+        # Always consider the base case (direct shortest path, no midpoints)
+        # as a candidate. This guarantees the recursion never returns None
+        # when a feasible path exists.
+        P0 = self._shortest_path_cached(s, t)
+        S0 = sampling_fn(
+            path=P0,
+            tau=tau,
+            graph=self.graph,
+            sampling_cfg=self.sampling_config,
+        )
+        S0_feats = self._features_from_items(S0)
+        gain0 = self.objective.marginal_gain(X_feats, S0_feats)
+        best_gain = float(gain0)
+        best_path: Optional[List[int]] = P0
+        best_samples: List[MeasurementItem] = S0
 
         nodes = list(self.graph.nodes())
         splits = self._budget_split_candidates(B)
@@ -185,7 +202,16 @@ class GRGPlanner:
                     continue
 
                 P = self._concat_paths(P1, P2)
-                S = S1 + S2
+                # Deduplicate: P2 starts at the midpoint v which is already
+                # the last node sampled by h(P1).  Remove node-samples from
+                # S2 that duplicate items in S1 (the paper treats sample sets
+                # as proper sets, so each location is counted once).
+                S1_set = {(it.lat, it.lon, it.depth, it.source, it.edge, it.alpha) for it in S1}
+                S2_dedup = [
+                    it for it in S2
+                    if (it.lat, it.lon, it.depth, it.source, it.edge, it.alpha) not in S1_set
+                ]
+                S = S1 + S2_dedup
                 S_feats = self._features_from_items(S)
                 total_gain = float(self.objective.marginal_gain(X_feats, S_feats))
 
@@ -212,19 +238,5 @@ class GRGPlanner:
 
     @staticmethod
     def _features_from_items(items: Sequence[MeasurementItem]) -> np.ndarray:
-        if not items:
-            return np.zeros((0, 2), dtype=float)
-        lats = np.array([it.lat for it in items], dtype=float)
-        lons = np.array([it.lon for it in items], dtype=float)
-        feats = [lats, lons]
-        if any(it.time is not None for it in items):
-            times = []
-            for it in items:
-                if it.time is None:
-                    times.append(np.datetime64("NaT", "ns"))
-                else:
-                    times.append(np.datetime64(it.time, "ns"))
-            t_arr = np.array(times, dtype="datetime64[ns]").astype("int64") / 1e9
-            feats.append(t_arr.astype(float))
-        return np.column_stack(feats)
+        return features_from_items(items)
 

@@ -1,0 +1,19 @@
+field_model:
+  backend: sogp_paper
+  params:
+    max_basis_size: 100
+    novelty_threshold: 1.0e-6
+    jitter: 1.0e-8
+    include_time: true
+    include_depth: false
+    use_scaling: true
+    lengthscale: 1.0
+    variance: 1.0
+    hyper_fit_method: loo_cv
+    hyper_fit_max_iters: 80
+    max_history: 8000
+
+noise:
+  mode: fixed
+  fixed_sigma2: 0.001
+  estimate_method: residual

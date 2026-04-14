@@ -43,6 +43,8 @@ class GPConfig:
         Number of optimization steps for hyperparameters (0 = no training).
     """
 
+    kernel_type: str = "rbf"
+    nu: float = 2.5
     lengthscale: float = 1.0
     variance: float = 1.0
     noise: float = 1e-3
@@ -61,10 +63,15 @@ class _ExactGPRegressionModel(gpytorch.models.ExactGP):
         *,
         lengthscale: float,
         variance: float,
+        kernel_type: str = "rbf",
+        nu: float = 2.5,
     ) -> None:
         super().__init__(train_x, train_y, likelihood)
         self.mean_module = gpytorch.means.ConstantMean()
-        base_kernel = gpytorch.kernels.RBFKernel()
+        if kernel_type == "matern":
+            base_kernel = gpytorch.kernels.MaternKernel(nu=nu)
+        else:
+            base_kernel = gpytorch.kernels.RBFKernel()
         base_kernel.lengthscale = float(lengthscale)
         self.covar_module = gpytorch.kernels.ScaleKernel(base_kernel)
         self.covar_module.outputscale = float(variance)
@@ -95,6 +102,8 @@ class GPFieldModel(FieldBeliefModel):
         cfg_mapping = dict(config or {})
         lengthscale, variance, noise = parse_gp_hyperparams(cfg_mapping)
         self._cfg = GPConfig(
+            kernel_type=str(cfg_mapping.get("kernel_type", "rbf")).lower(),
+            nu=float(cfg_mapping.get("nu", 2.5)),
             lengthscale=lengthscale,
             variance=variance,
             noise=noise,
@@ -123,7 +132,6 @@ class GPFieldModel(FieldBeliefModel):
 
     @property
     def supports_online_update(self) -> bool:
-        # This implementation does not implement efficient online updates.
         return False
 
     # ------------------------------------------------------------------
@@ -162,6 +170,8 @@ class GPFieldModel(FieldBeliefModel):
             likelihood,
             lengthscale=self._cfg.lengthscale,
             variance=self._cfg.variance,
+            kernel_type=self._cfg.kernel_type,
+            nu=self._cfg.nu,
         ).to(self._device)
         likelihood = likelihood.to(self._device)
 
@@ -175,7 +185,7 @@ class GPFieldModel(FieldBeliefModel):
             model.train()
             likelihood.train()
             optimizer = torch.optim.Adam(
-                list(model.parameters()) + 
+                list(model.parameters()) +
                 list(likelihood.parameters()),
                 lr=float(self.config.get("lr", 0.1)),
             )

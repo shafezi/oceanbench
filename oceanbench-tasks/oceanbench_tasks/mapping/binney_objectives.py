@@ -12,17 +12,20 @@ from oceanbench_models.belief.field.covariance_backends import (
 )
 
 
-def _stable_logdet(K: ArrayLike, jitter: float = 1e-6) -> float:
+def _stable_logdet(K: ArrayLike, jitter: float = 1e-6, max_retries: int = 3) -> float:
     """Compute log(det(K)) in a numerically stable way."""
     K = np.asarray(K, dtype=float)
     n = K.shape[0]
-    K = K + jitter * np.eye(n, dtype=float)
-    sign, logdet = np.linalg.slogdet(K)
-    if sign <= 0:
-        # Fall back to a small value to avoid NaNs; this should be rare if
-        # covariance construction is well-conditioned.
-        return float(logdet)
-    return float(logdet)
+    current_jitter = jitter
+    for _ in range(max_retries):
+        K_reg = K + current_jitter * np.eye(n, dtype=float)
+        sign, logdet = np.linalg.slogdet(K_reg)
+        if sign > 0:
+            return float(logdet)
+        current_jitter *= 10.0
+    # All retries failed; return a large negative value so that
+    # entropy/MI objectives treat this as maximum uncertainty.
+    return float(-n * np.log(current_jitter))
 
 
 class BinneyObjective(ABC):
